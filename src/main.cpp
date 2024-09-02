@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <SHT45.h>
 #include <Wire.h>
+#define __STM32F4__
+#include "LoRa_E32.h"
+#include "SparkFun_SCD30_Arduino_Library.h"
 
 void setup() {
   Wire.begin();
