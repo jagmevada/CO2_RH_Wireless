@@ -1,4 +1,4 @@
-#include "SHT45.h"
+#include "sht45.h"
 
 SHT45::SHT45(TwoWire *wire, uint8_t addr) {
   this->_wire = wire;
