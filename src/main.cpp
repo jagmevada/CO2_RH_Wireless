@@ -1,10 +1,12 @@
 
 #include <Arduino.h>
+#include <SD.h>
 #include <Wire.h>
 #include <lora_e32.h>
 #include <sht45.h>
 
 #include "SparkFun_SCD30_Arduino_Library.h"
+
 #define AUX 1
 #define M1 2
 #define M0 3
@@ -22,6 +24,10 @@ void getSHT45Data();
 void getSCD30Data();
 void printSensorData();
 void setuplora();
+void decodeData(uint32_t encd, float &temp, float &rh, uint16_t &co2);
+uint32_t encodeData(float temperature, float humidity, uint16_t co2);
+uint64_t xorshift64(uint64_t *state);
+uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max);
 // #define
 // HardwareSerial pc = Serial;
 // HardwareSerial lora = Serial1;
@@ -31,7 +37,10 @@ void setuplora();
 uint8_t addrh = 0xdd;
 uint8_t addrl = 0xee;
 uint8_t channel = 0x11;
-
+uint64_t state =
+    1234567890123456789ULL;  // Different seed for each run or device
+uint64_t randvalue;
+uint32_t randtime;
 void setup() {
   Serial.begin(9600);
   lora.begin(9600);
@@ -56,12 +65,27 @@ void setup() {
   // airSensor.setAutoSelfCalibration(1);
   printSCD30Settings();
 }
+
 float t45, rh45, ts, rhs;
+float td, rhd;
+uint16_t co2d;
 uint16_t co2;
+uint32_t encdata;
 void loop() {
   getSHT45Data();
   getSCD30Data();
+  encdata = encodeData(t45, rh45, co2);
+  // const uint8_t *bptr = reinterpret_cast<const uint8_t *>(&encdata);
+  // uint8_t buff[4] = {bptr[0], bptr[1], bptr[2], bptr[3]};
+  // uint32_t rencdata = *reinterpret_cast<uint32_t *>(encdata.buf);
+
+  decodeData(encdata, td, rhd, co2d);
   printSensorData();
+
+  // for (int i = 0; i < 20; i++) {
+  randvalue = xorshift64(&state);
+  randtime = mapToRange(randvalue, 0, 25000);
+
   delay(2000);
 }
 
@@ -178,6 +202,17 @@ void printSensorData() {
   Serial.print(String(rhs, 1));
   Serial.print(", co2: ");
   Serial.println(co2);
+  Serial.print("td: ");
+  Serial.print(String(td, 1));
+  Serial.print(", rhd: ");
+  Serial.print(String(rhd, 1));
+  Serial.print(", ts: ");
+  Serial.print(String(ts, 1));
+  Serial.print(", rhs: ");
+  Serial.print(String(rhs, 1));
+  Serial.print(", co2d: ");
+  Serial.println(co2d);
+  Serial.println();
 }
 
 void setuplora() {
@@ -203,4 +238,75 @@ void setuplora() {
   // while (Serial1.available()) {
   //   Serial.println(Serial1.read(), HEX);
   // }
+}
+
+// Define a union to overlay a 32-bit integer with the three components
+union sensordata {
+  uint32_t encoded;  // 32-bit integer representation
+  uint8_t buf[4];
+  struct {
+    uint16_t temperatureScaled : 9;  // 9 bits for temperature (0-450)
+    uint16_t humidityScaled : 10;    // 10 bits for humidity (0-1000)
+    uint16_t co2 : 13;               // 13 bits for CO2 (400-5000)
+  } parts;
+};
+
+// Function to encode sensor data into a 32-bit integer using the union
+uint32_t encodeData(float temperature, float humidity, uint16_t co2) {
+  // Ensure values are within the expected ranges
+  if (temperature < 0.0 || temperature > 45.0) return 0xFFFFFFFF;
+  if (humidity < 0.0 || humidity > 100.0) return 0xFFFFFFFF;
+  if (co2 < 400 || co2 > 5000) return 0xFFFFFFFF;
+
+  // Scale and convert the values
+  uint16_t tempScaled = (uint16_t)(temperature * 10);  // 0-450 (0.0 to 45.0)
+  uint16_t humScaled = (uint16_t)(humidity * 10);      // 0-1000 (0.0 to 100.0)
+
+  // Create a union instance for encoding
+  sensordata data;
+  data.parts.temperatureScaled = tempScaled & 0x1FF;  // 9 bits
+  data.parts.humidityScaled = humScaled & 0x3FF;      // 10 bits
+  data.parts.co2 = co2 & 0x1FFF;                      // 13 bits
+  return data.encoded;
+}
+
+// Function to decode a 32-bit integer into sensor data using the union
+void decodeData(uint32_t encodedData, float &temperature, float &humidity,
+                uint16_t &co2) {
+  // Create a union instance for decoding
+  sensordata data;
+  data.encoded = encodedData;
+
+  // Extract values from the union
+  uint16_t tempScaled = data.parts.temperatureScaled;
+  uint16_t humScaled = data.parts.humidityScaled;
+  uint16_t co2Scaled = data.parts.co2;
+
+  temperature = tempScaled / 10.0;  // Convert back to temperature
+  humidity = humScaled / 10.0;      // Convert back to humidity
+  co2 = co2Scaled;                  // Convert back to CO2, adding offset
+}
+
+void sendDataOverSerial1(uint32_t data) {
+  // Create a pointer to the 32-bit data
+  const uint8_t *bytePtr = reinterpret_cast<const uint8_t *>(&data);
+
+  // Send each byte of the 32-bit data
+  Serial1.write(bytePtr[3]);  // Send the highest byte (most significant byte)
+  Serial1.write(bytePtr[2]);  // Send the second byte
+  Serial1.write(bytePtr[1]);  // Send the third byte
+  Serial1.write(bytePtr[0]);  // Send the lowest byte (least significant byte)
+}
+
+// 64-bit Xorshift PRNG implementation
+uint64_t xorshift64(uint64_t *state) {
+  *state ^= (*state << 13);
+  *state ^= (*state >> 7);
+  *state ^= (*state << 17);
+  return *state;
+}
+
+// Map random number to a specific range
+uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max) {
+  return min + (randomValue % (max - min + 1));
 }
