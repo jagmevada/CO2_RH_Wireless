@@ -4,9 +4,13 @@
 #include <Wire.h>
 #include <lora_e32.h>
 #include <sht45.h>
-
 #include "SparkFun_SCD30_Arduino_Library.h"
 
+#define DEVICE_ID 1
+#define rfchannel 20
+#define rfaddrl 0x11
+#define rfaddrh 0x22+DEVICE_ID
+#define READ_INTERVAL 2200
 #define AUX 1
 #define M1 2
 #define M0 3
@@ -15,6 +19,31 @@ LORA_E32 lora(Serial1, M0, M1, AUX);
 
 SHT45 sht45(&Wire, 0x44);  // SHT45-AD1B => 0x44
 SCD30 airSensor;
+
+typedef union{
+  //uint32_t encoded;  // 32-bit integer representation
+  uint8_t buf[5];
+  struct {
+    uint16_t temperatureScaled : 9;  // 9 bits for temperature (0-450)
+    uint16_t humidityScaled : 10;    // 10 bits for humidity (0-1000)
+    uint16_t co2 : 13;               // 13 bits for CO2 (400-5000)
+    uint8_t id: 8;
+  } parts;
+}sensordata;
+
+typedef struct{
+  uint8_t addrh;
+  uint8_t addrl;
+  uint8_t channel;
+  sensordata payload;// The sensor data is part of this structure
+} datapack;
+
+typedef union rfdata{ 
+  datapack rfpacket;// Structured packet
+  uint8_t rfbuf[8];// Buffer for raw data, should match the size of datapack
+} rfpacket;
+// Define a union to overlay a 32-bit integer with the three components
+
 // Function declarations
 void initializeSHT45();
 void initializeSCD30(bool asc);
@@ -24,23 +53,20 @@ void getSHT45Data();
 void getSCD30Data();
 void printSensorData();
 void setuplora();
-void decodeData(uint32_t encd, float &temp, float &rh, uint16_t &co2);
-uint32_t encodeData(float temperature, float humidity, uint16_t co2);
+void decodeData(sensordata encd, float &temp, float &rh, uint16_t &co2, uint8_t &id);
+sensordata encodeData(float temperature, float humidity, uint16_t co2, uint8_t id);
+rfpacket makepacket(uint8_t addr_h, uint8_t addr_l, uint8_t ch, sensordata sd);
+void printrfdata(rfpacket r);
 uint64_t xorshift64(uint64_t *state);
 uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max);
-// #define
-// HardwareSerial pc = Serial;
-// HardwareSerial lora = Serial1;
-// HardwareSerial Serial;
-// HardwareSerial Serial1;
-// pc = &Serial;
+
 uint8_t addrh = 0xdd;
 uint8_t addrl = 0xee;
 uint8_t channel = 0x11;
-uint64_t state =
-    1234567890123456789ULL;  // Different seed for each run or device
+uint64_t state = 1234567890123456789ULL;
 uint64_t randvalue;
-uint32_t randtime;
+uint32_t randtime, nextime;
+uint64_t accesstime, t0;
 void setup() {
   Serial.begin(9600);
   lora.begin(9600);
@@ -64,29 +90,47 @@ void setup() {
   configureSCD30();
   // airSensor.setAutoSelfCalibration(1);
   printSCD30Settings();
+
+    randvalue = xorshift64(&state);
+  randtime = mapToRange(randvalue, 0, 15000);
+  accesstime = millis();
+   getSHT45Data();
+  getSCD30Data();
+  t0=millis();
+  
 }
 
 float t45, rh45, ts, rhs;
 float td, rhd;
 uint16_t co2d;
 uint16_t co2;
-uint32_t encdata;
+uint8_t id;
+sensordata encdata;
+rfpacket txdata;
+rfpacket rxdata;
+
+
 void loop() {
-  getSHT45Data();
+if(millis()-t0>READ_INTERVAL){
+  t0=millis();
+ getSHT45Data();
   getSCD30Data();
-  encdata = encodeData(t45, rh45, co2);
-  // const uint8_t *bptr = reinterpret_cast<const uint8_t *>(&encdata);
-  // uint8_t buff[4] = {bptr[0], bptr[1], bptr[2], bptr[3]};
-  // uint32_t rencdata = *reinterpret_cast<uint32_t *>(encdata.buf);
+   encdata = encodeData(t45, rh45, co2, DEVICE_ID);
+  txdata = makepacket(rfaddrh, rfaddrl, rfchannel, encdata);
+};
+ 
+ 
+  if(millis()-accesstime > randtime){
+      memcpy(rxdata.rfbuf, txdata.rfbuf, sizeof(rxdata.rfbuf));
+      decodeData(rxdata.rfpacket.payload, td, rhd, co2d, id);
+      randvalue = xorshift64(&state);
+      randtime = mapToRange(randvalue, 250, 1000);
+      nextime = randtime;
+      printrfdata(rxdata);
 
-  decodeData(encdata, td, rhd, co2d);
-  printSensorData();
-
-  // for (int i = 0; i < 20; i++) {
-  randvalue = xorshift64(&state);
-  randtime = mapToRange(randvalue, 0, 25000);
-
-  delay(2000);
+      accesstime=millis();
+  }
+  delay(1);
 }
 
 // put function definitions here:
@@ -192,16 +236,16 @@ void getSCD30Data() {
 }
 
 void printSensorData() {
-  Serial.print("t45: ");
-  Serial.print(String(t45, 1));
-  Serial.print(", rh45: ");
-  Serial.print(String(rh45, 1));
-  Serial.print(", ts: ");
-  Serial.print(String(ts, 1));
-  Serial.print(", rhs: ");
-  Serial.print(String(rhs, 1));
-  Serial.print(", co2: ");
-  Serial.println(co2);
+  // Serial.print("t45: ");
+  // Serial.print(String(t45, 1));
+  // Serial.print(", rh45: ");
+  // Serial.print(String(rh45, 1));
+  // Serial.print(", ts: ");
+  // Serial.print(String(ts, 1));
+  // Serial.print(", rhs: ");
+  // Serial.print(String(rhs, 1));
+  // Serial.print(", co2: ");
+  // Serial.println(co2);
   Serial.print("td: ");
   Serial.print(String(td, 1));
   Serial.print(", rhd: ");
@@ -213,6 +257,28 @@ void printSensorData() {
   Serial.print(", co2d: ");
   Serial.println(co2d);
   Serial.println();
+}
+
+void printrfdata(rfpacket r) {
+    // Print data in one line with labels, commas, and spaces
+    Serial.print("ID: 0x");
+    Serial.print(r.rfpacket.addrh, HEX);
+    Serial.print(r.rfpacket.addrl, HEX);
+    Serial.print(", CH: ");
+    Serial.print(r.rfpacket.channel, HEX);
+    Serial.print("\tT: ");
+    Serial.print(r.rfpacket.payload.parts.temperatureScaled/10.0,1);
+    Serial.print("°C \tRH: ");
+    Serial.print(r.rfpacket.payload.parts.humidityScaled/10.0,1);
+    Serial.print("%\tCO2: ");
+    Serial.print(r.rfpacket.payload.parts.co2);
+    Serial.print("ppm\tID: ");
+    Serial.print(r.rfpacket.payload.parts.id);
+    Serial.print("\tt:");
+    Serial.println(nextime);
+
+
+
 }
 
 void setuplora() {
@@ -240,23 +306,17 @@ void setuplora() {
   // }
 }
 
-// Define a union to overlay a 32-bit integer with the three components
-union sensordata {
-  uint32_t encoded;  // 32-bit integer representation
-  uint8_t buf[4];
-  struct {
-    uint16_t temperatureScaled : 9;  // 9 bits for temperature (0-450)
-    uint16_t humidityScaled : 10;    // 10 bits for humidity (0-1000)
-    uint16_t co2 : 13;               // 13 bits for CO2 (400-5000)
-  } parts;
-};
+
 
 // Function to encode sensor data into a 32-bit integer using the union
-uint32_t encodeData(float temperature, float humidity, uint16_t co2) {
+sensordata encodeData(float temperature, float humidity, uint16_t co2, uint8_t deviceid) {
   // Ensure values are within the expected ranges
-  if (temperature < 0.0 || temperature > 45.0) return 0xFFFFFFFF;
-  if (humidity < 0.0 || humidity > 100.0) return 0xFFFFFFFF;
-  if (co2 < 400 || co2 > 5000) return 0xFFFFFFFF;
+  if (temperature > 45.0) 
+  temperature = 0.0;
+  if (humidity >= 100.0) 
+  humidity = 0.0;
+  if ( co2 > 8190) 
+  co2= 8190;
 
   // Scale and convert the values
   uint16_t tempScaled = (uint16_t)(temperature * 10);  // 0-450 (0.0 to 45.0)
@@ -267,15 +327,16 @@ uint32_t encodeData(float temperature, float humidity, uint16_t co2) {
   data.parts.temperatureScaled = tempScaled & 0x1FF;  // 9 bits
   data.parts.humidityScaled = humScaled & 0x3FF;      // 10 bits
   data.parts.co2 = co2 & 0x1FFF;                      // 13 bits
-  return data.encoded;
+  data.parts.id = deviceid;
+  return data;
 }
 
 // Function to decode a 32-bit integer into sensor data using the union
-void decodeData(uint32_t encodedData, float &temperature, float &humidity,
-                uint16_t &co2) {
+void decodeData(sensordata encodedData, float &temperature, float &humidity,
+                uint16_t &co2, uint8_t &id) {
   // Create a union instance for decoding
   sensordata data;
-  data.encoded = encodedData;
+  data = encodedData;
 
   // Extract values from the union
   uint16_t tempScaled = data.parts.temperatureScaled;
@@ -285,6 +346,7 @@ void decodeData(uint32_t encodedData, float &temperature, float &humidity,
   temperature = tempScaled / 10.0;  // Convert back to temperature
   humidity = humScaled / 10.0;      // Convert back to humidity
   co2 = co2Scaled;                  // Convert back to CO2, adding offset
+  id = data.parts.id;
 }
 
 void sendDataOverSerial1(uint32_t data) {
@@ -309,4 +371,14 @@ uint64_t xorshift64(uint64_t *state) {
 // Map random number to a specific range
 uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max) {
   return min + (randomValue % (max - min + 1));
+}
+
+rfpacket makepacket(uint8_t addr_h, uint8_t addr_l, uint8_t ch, sensordata sd){
+
+rfpacket x;
+x.rfpacket.addrh = addr_h;
+x.rfpacket.addrl = addr_l;
+x.rfpacket.channel = ch;
+x.rfpacket.payload = sd;
+return x;
 }
