@@ -6,7 +6,7 @@
 #include <sht45.h>
 #include "SparkFun_SCD30_Arduino_Library.h"
 
-#define SLAVE
+#define MASTER
 
 #define MASTER_ADDR 0
 #define DEVICE_ID 1
@@ -87,7 +87,7 @@ void setup()
   lora.begin(9600);
   delay(100);
   Serial.println("init...");
-  Wire.begin();
+  // Wire.begin();
 
   // Set the module to normal mode
   lora.reset();
@@ -102,19 +102,19 @@ void setup()
   delay(10);
   lora.setMode(MODE_NORMAL);
   delay(10);
-  initializeSHT45();
-  initializeSCD30(1);
-  delay(2000); // Wait for sensor stabilization
-  configureSCD30();
+  // initializeSHT45();
+  // initializeSCD30(1);
+  // delay(2000); // Wait for sensor stabilization
+  // configureSCD30();
   // airSensor.setAutoSelfCalibration(1);
-  Serial.println();
-  printSCD30Settings();
+  // Serial.println();
+  // printSCD30Settings();
 
-  randvalue = xorshift64(&state);
-  randtime = mapToRange(randvalue, 0, 15000);
+  // randvalue = xorshift64(&state);
+  // randtime = mapToRange(randvalue, 0, 15000);
   accesstime = millis();
-  getSHT45Data();
-  getSCD30Data();
+  // getSHT45Data();
+  // getSCD30Data();
   t0 = millis();
 }
 
@@ -129,30 +129,25 @@ rfpacket rxdata;
 
 void loop()
 {
-  if (millis() - t0 > READ_INTERVAL)
-  { /// independent sensor reading
-    t0 = millis();
-    getSHT45Data();
-    getSCD30Data();
-    encdata = encodeData(t45, rh45, co2, DEVICE_ID);
-  };
+  // if (millis() - accesstime > randtime)
+  // random acces RF transmit
+  // txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
+  // lora.sendData(txdata.rfbuf, 8); /// send over RF
+  // printrfbuf(txdata);
 
-  if (millis() - accesstime > randtime)
-  { // random acces RF transmit
-    txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
-    lora.sendData(txdata.rfbuf, 8); /// send over RF
-    // printrfbuf(txdata);
-    // lora.receiveData(encdata.buf,5);
-    // printencdata(encdata);
-    // memcpy(rxdata.rfbuf, txdata.rfbuf, sizeof(rxdata.rfbuf));
-    // decodeData(txdata.rfpacket.payload, td, rhd, co2d, id);
-    randvalue = xorshift64(&state);
-    randtime = mapToRange(randvalue, 250, 15000); // random access time
-    nextime = randtime;
-    printrfdata(txdata);
-    accesstime = millis();
+  if (lora.receiveData(encdata.buf, 5) == 5)
+  {
+    printencdata(encdata);
   }
-  delay(1);
+  // memcpy(rxdata.rfbuf, txdata.rfbuf, sizeof(rxdata.rfbuf));
+  // decodeData(txdata.rfpacket.payload, td, rhd, co2d, id);
+  // randvalue = xorshift64(&state);
+  // randtime = mapToRange(randvalue, 250, 15000); // random access time
+  // nextime = randtime;
+  // printrfdata(txdata);
+  // accesstime = millis();
+  // }
+  delay(10);
 }
 
 // put function definitions here:
