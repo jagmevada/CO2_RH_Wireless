@@ -11,18 +11,18 @@
 
 #define ASC_EEPROM_ADDR 0x01
 #define MASTER_ADDR 0
-#define DEVICE_ID 0
+#define DEVICE_ID 25
 #define SENSOR_ADDR_OFFSET 0x10
-#define SENSOR_CHANNEL_OFFSET 0x10
+#define SENSOR_CHANNEL_OFFSET 0x05
 
 #ifdef MASTER
 #define DEVICE_ADDR MASTER_ADDR
 #else
 #define DEVICE_ADDR SENSOR_ADDR_OFFSET + DEVICE_ID
-#define CHANNEL_OFFSET SENSOR_CHANNEL_OFFSET + ((DEVICE_ID) << 1)
+// #define CHANNEL_OFFSET (SENSOR_CHANNEL_OFFSET + DEVICE_ID)
 #endif
 
-#define RFCHANNEL 20
+#define RFCHANNEL 0x05
 #define RFADDRL 0x11
 #define RFADDRH 0x44
 #define READ_INTERVAL 2500
@@ -454,10 +454,10 @@ void setuplora()
   option.fields.power = POWER_LEVEL_10dBm;
   // uint8_t buffer[6] = {0xc0, RFADDRH, RFADDRL+MASTER_ADDR, sped.byte, RFCHANNEL, option.byte};
 
-  Serial.println("\n\nSetparameter:");
+  Serial.println("\nSetparameter:");
 
   // lora.printparameter(buffer, 6);
-  lora.setParameters(RFADDRH, RFADDRL + DEVICE_ADDR, sped, RFCHANNEL + CHANNEL_OFFSET, option); // set my address
+  lora.setParameters(RFADDRH, RFADDRL + DEVICE_ADDR, sped, RFCHANNEL + DEVICE_ID, option); // set my address
   // delay(10);
 
   // delay(100);
@@ -539,7 +539,7 @@ uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max)
 rfpacket makepacket(uint8_t addr_h, uint8_t addr_l, uint8_t ch, sensordata sd)
 {
   command tx;
-  tx.fields.id = addr_l - (RFADDRL + SENSOR_ADDR_OFFSET);
+  tx.fields.id = DEVICE_ID; // addr_l - (RFADDRL + SENSOR_ADDR_OFFSET);
   tx.fields.asc = asc_state;
   tx.fields.checksum = 0;
   // tx.fields.checksum = even_parity(encdata.buf[0]) ^ even_parity(encdata.buf[1]) ^ even_parity(encdata.buf[2]);
