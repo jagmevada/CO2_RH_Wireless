@@ -10,9 +10,11 @@
 
 #define MASTER_ADDR 0
 #define DEVICE_ID 0
+#define SENSOR_CHANNEL_OFFSET 0x10
+#define SENSOR_ADDR_OFFSET 0X10
+
 #ifdef MASTER
 #define DEVICE_ADDR MASTER_ADDR
-#define SENSOR_ADDR_OFFSET 0X10
 #else
 #define DEVICE_ADDR 0x10 + DEVICE_ID
 #endif
@@ -149,10 +151,10 @@ void loop()
   // txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
   // lora.sendData(txdata.rfbuf, 8); /// send over RF
   // printrfbuf(txdata);
-  for (int i = 0; i < 25; i++)
+  for (uint8_t i = 0; i < 25; i++)
   {
     encdata = encodeData(t45, rh45, co2, 0);
-    txdata = makepacket(RFADDRH, RFADDRL + SENSOR_ADDR_OFFSET + i, RFCHANNEL, encdata);
+    txdata = makepacket(RFADDRH, RFADDRL + SENSOR_ADDR_OFFSET + i, RFCHANNEL + SENSOR_CHANNEL_OFFSET + (i << 1), encdata);
     // printrfdata(txdata);
     lora.sendData(txdata.rfbuf, 8); /// send over RF
     // Serial.println();
