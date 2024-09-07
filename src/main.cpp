@@ -5,13 +5,14 @@
 #include <lora_e32.h>
 #include <sht45.h>
 #include "SparkFun_SCD30_Arduino_Library.h"
-
+#include <EEPROM.h>
 #define MASTER
 
 #define MASTER_ADDR 0
-#define DEVICE_ID 1
+#define DEVICE_ID 0
 #ifdef MASTER
 #define DEVICE_ADDR MASTER_ADDR
+#define SENSOR_ADDR_OFFSET 0X10
 #else
 #define DEVICE_ADDR 0x10 + DEVICE_ID
 #endif
@@ -20,14 +21,31 @@
 #define RFADDRL 0x11
 #define RFADDRH 0x44
 #define READ_INTERVAL 2500
+
+#define ASC 1
 #define AUX 1
 #define M1 2
 #define M0 3
+
+// CRC16-CCITT polynomial (0x8005) and initial value
+#define CRC16_POLY 0x8005
+#define CRC16_INIT 0xFFFF
 
 LORA_E32 lora(Serial1, M0, M1, AUX);
 
 SHT45 sht45(&Wire, 0x44); // SHT45-AD1B => 0x44
 SCD30 airSensor;
+
+typedef union
+{
+  uint8_t cmd;
+  struct
+  {
+    uint8_t checksum : 2; // LSB
+    uint8_t asc : 1;
+    uint8_t id : 5; // MSB
+  } fields;
+} command;
 
 typedef union
 {
@@ -38,7 +56,7 @@ typedef union
     uint16_t temperatureScaled : 9; // 9 bits for temperature (0-450)
     uint16_t humidityScaled : 10;   // 10 bits for humidity (0-1000)
     uint16_t co2 : 13;              // 13 bits for CO2 (400-5000)
-    uint8_t id : 8;
+    uint8_t id : 8;                 // command asc_state,  device id and parity
   } parts;
 } sensordata;
 
@@ -74,6 +92,13 @@ uint64_t xorshift64(uint64_t *state);
 uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max);
 void printrfbuf(rfdata xdata);
 void printencdata(sensordata r);
+
+uint8_t even_parity(uint8_t byte); // even parity check
+uint8_t read_asc_eerpom();
+void encode_data_with_crc(uint8_t data, uint8_t *encoded);
+uint16_t verify_data_with_crc(uint8_t data, const uint8_t *encoded);
+uint16_t compute_crc16(uint8_t data);
+
 // uint8_t addrh = 0xdd;
 // uint8_t addrl = 0xee;
 uint8_t channel = 0x11;
@@ -81,18 +106,20 @@ uint64_t state = 1234567890123456789ULL;
 uint64_t randvalue;
 uint32_t randtime, nextime;
 uint64_t accesstime, t0;
+uint8_t asc_state = ASC;
+uint8_t eeprom_flashed = 0;
 void setup()
 {
   Serial.begin(9600);
+  asc_state = read_asc_eerpom();
   lora.begin(9600);
   delay(100);
   Serial.println("init...");
   // Wire.begin();
-
   // Set the module to normal mode
   lora.reset();
   lora.setMode(MODE_SETUP);
-
+  asc_state = ASC;
   // lora.readParameters();
   setuplora();
 
@@ -102,19 +129,6 @@ void setup()
   delay(10);
   lora.setMode(MODE_NORMAL);
   delay(10);
-  // initializeSHT45();
-  // initializeSCD30(1);
-  // delay(2000); // Wait for sensor stabilization
-  // configureSCD30();
-  // airSensor.setAutoSelfCalibration(1);
-  // Serial.println();
-  // printSCD30Settings();
-
-  // randvalue = xorshift64(&state);
-  // randtime = mapToRange(randvalue, 0, 15000);
-  accesstime = millis();
-  // getSHT45Data();
-  // getSCD30Data();
   t0 = millis();
 }
 
@@ -126,6 +140,7 @@ uint8_t id;
 sensordata encdata;
 rfpacket txdata;
 rfpacket rxdata;
+uint8_t parity[5];
 
 void loop()
 {
@@ -134,11 +149,23 @@ void loop()
   // txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
   // lora.sendData(txdata.rfbuf, 8); /// send over RF
   // printrfbuf(txdata);
-
-  if (lora.receiveData(encdata.buf, 5) == 5)
+  for (int i = 0; i < 25; i++)
   {
-    printencdata(encdata);
+    encdata = encodeData(t45, rh45, co2, 0);
+    txdata = makepacket(RFADDRH, RFADDRL + SENSOR_ADDR_OFFSET + i, RFCHANNEL, encdata);
+    // printrfdata(txdata);
+    lora.sendData(txdata.rfbuf, 8); /// send over RF
+    // Serial.println();
+    // Serial.print("sent to : ");
+    // Serial.print(i);
+    delay(500);
+    if (lora.receiveData(encdata.buf, 5) == 5)
+    {
+      // Serial.print("\t");
+      printencdata(encdata);
+    }
   }
+
   // memcpy(rxdata.rfbuf, txdata.rfbuf, sizeof(rxdata.rfbuf));
   // decodeData(txdata.rfpacket.payload, td, rhd, co2d, id);
   // randvalue = xorshift64(&state);
@@ -350,24 +377,31 @@ void printrfdata(rfpacket r)
   Serial.print(r.rfpacket.payload.parts.humidityScaled / 10.0, 1);
   Serial.print("%\tCO2: ");
   Serial.print(r.rfpacket.payload.parts.co2);
+  command c;
+  c.cmd = r.rfpacket.payload.parts.id;
   Serial.print("ppm\tID: ");
-  Serial.print(r.rfpacket.payload.parts.id);
+  Serial.print(c.fields.id);
+  Serial.print("\tASC: ");
+  Serial.print(c.fields.asc);
   Serial.print("\tt:");
   Serial.println(nextime);
 }
 
 void printencdata(sensordata r)
 {
+  command x;
+  x.cmd = r.parts.id;
+
   Serial.print("T: ");
   Serial.print(r.parts.temperatureScaled / 10.0, 1);
   Serial.print("°C\tRH: ");
   Serial.print(r.parts.humidityScaled / 10.0, 1);
   Serial.print("%\tCO2: ");
   Serial.print(r.parts.co2);
-  Serial.print("ppm\tID: ");
-  Serial.println(r.parts.id);
-  // Serial.print("\tt:");
-  // Serial.println(nextime);
+  Serial.print("ppm\tASC: ");
+  Serial.print(x.fields.asc);
+  Serial.print("\tID: ");
+  Serial.println(x.fields.id);
 }
 
 void setuplora()
@@ -469,10 +503,97 @@ uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max)
 rfpacket makepacket(uint8_t addr_h, uint8_t addr_l, uint8_t ch, sensordata sd)
 {
 
+  command tx;
+  tx.fields.id = addr_l - (RFADDRL + SENSOR_ADDR_OFFSET);
+  tx.fields.asc = asc_state;
+  tx.fields.checksum = 0;
+
+  sd.buf[0] = tx.cmd;
+  sd.buf[1] = tx.cmd;
+  sd.buf[2] = tx.cmd;
+  sd.buf[3] = tx.cmd;
+  sd.parts.id = tx.cmd;
+  // sd.buf[4] = tx.cmd;
+  // uint8_t encoded[2]; // 2-byte field for error
+  // encode_data_with_crc(tx.cmd, encoded);
+  // sd.buf[0] = encoded[0];
+  // sd.buf[1] = encoded[1];
+  // Serial.print("CRC result: ");
+  // Serial.println(verify_data_with_crc(tx.cmd, sd.buf));
+  // tx.fields.checksum = even_parity(encdata.buf[0]) ^ even_parity(encdata.buf[1]) ^ even_parity(encdata.buf[2]);
+  // tx.fields.checksum += ((even_parity(encdata.buf[3]) ^ even_parity(encdata.buf[4])) << 1);
+
   rfpacket x;
   x.rfpacket.addrh = addr_h;
   x.rfpacket.addrl = addr_l;
   x.rfpacket.channel = ch;
   x.rfpacket.payload = sd;
   return x;
+}
+
+// Function to compute even parity for a single byte
+uint8_t even_parity(uint8_t byte)
+{
+  // XOR all bits together
+  byte ^= byte >> 4;
+  byte ^= byte >> 2;
+  byte ^= byte >> 1;
+  return byte & 0x01; // Return the least significant bit as the parity
+}
+
+uint8_t read_asc_eerpom()
+{
+  uint8_t asc_addr = 0x01;
+  if (EEPROM.read(0xff) == 255)
+  {
+    eeprom_flashed = 1;
+    EEPROM.write(0xff, 1);
+    delay(10);
+    EEPROM.write(asc_addr, asc_state);
+    delay(10);
+    Serial.println("EEPROM Flashed");
+    return asc_state;
+  }
+  else
+  {
+    Serial.println("EEPROM retained");
+    return EEPROM.read(asc_addr);
+  }
+}
+
+// Function to compute CRC16-CCITT for a single byte of data
+uint16_t compute_crc16(uint8_t data)
+{
+  uint16_t crc = CRC16_INIT;
+  crc ^= (uint16_t)data << 8;
+
+  for (uint8_t i = 0; i < 8; ++i)
+  {
+    if (crc & 0x8000)
+    {
+      crc = (crc << 1) ^ CRC16_POLY;
+    }
+    else
+    {
+      crc = crc << 1;
+    }
+  }
+  return crc;
+}
+
+// Function to encode data with CRC16
+void encode_data_with_crc(uint8_t data, uint8_t *encoded)
+{
+  uint16_t crc = compute_crc16(data);
+  encoded[0] = (crc >> 8) & 0xFF; // High byte of CRC
+  encoded[1] = crc & 0xFF;        // Low byte of CRC
+}
+
+// Function to verify data with CRC16
+uint16_t verify_data_with_crc(uint8_t data, const uint8_t *encoded)
+{
+  uint16_t crc = compute_crc16(data);
+  uint16_t received_crc = (encoded[0] << 8) | encoded[1];
+
+  return crc == received_crc; // Return 1 if valid, 0 if invalid
 }
