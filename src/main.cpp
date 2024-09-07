@@ -9,17 +9,20 @@
 #define SLAVE
 
 #define MASTER_ADDR 0
-#define DEVICE_ID 1
+#define DEVICE_ID 0
+#define SENSOR_ADDR_OFFSET 0X10
 #ifdef MASTER
 #define DEVICE_ADDR MASTER_ADDR
 #else
-#define DEVICE_ADDR 0x10 + DEVICE_ID
+#define DEVICE_ADDR SENSOR_ADDR_OFFSET + DEVICE_ID
 #endif
 
 #define RFCHANNEL 20
 #define RFADDRL 0x11
 #define RFADDRH 0x44
 #define READ_INTERVAL 2500
+
+#define ASC 1
 #define AUX 1
 #define M1 2
 #define M0 3
@@ -31,6 +34,17 @@ SCD30 airSensor;
 
 typedef union
 {
+  uint8_t cmd;
+  struct
+  {
+    uint8_t checksum : 2; // LSB
+    uint8_t asc : 1;
+    uint8_t id : 5; // MSB
+  } fields;
+} command;
+
+typedef union
+{
   // uint32_t encoded;  // 32-bit integer representation
   uint8_t buf[5];
   struct
@@ -38,7 +52,7 @@ typedef union
     uint16_t temperatureScaled : 9; // 9 bits for temperature (0-450)
     uint16_t humidityScaled : 10;   // 10 bits for humidity (0-1000)
     uint16_t co2 : 13;              // 13 bits for CO2 (400-5000)
-    uint8_t id : 8;
+    uint8_t id : 8;                 // command asc_state,  device id and parity
   } parts;
 } sensordata;
 
@@ -74,6 +88,7 @@ uint64_t xorshift64(uint64_t *state);
 uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max);
 void printrfbuf(rfdata xdata);
 void printencdata(sensordata r);
+uint8_t even_parity(uint8_t byte);
 // uint8_t addrh = 0xdd;
 // uint8_t addrl = 0xee;
 uint8_t channel = 0x11;
@@ -81,6 +96,8 @@ uint64_t state = 1234567890123456789ULL;
 uint64_t randvalue;
 uint32_t randtime, nextime;
 uint64_t accesstime, t0;
+uint8_t asc_state = 1;
+uint8_t present_asc_state = 0;
 void setup()
 {
   Serial.begin(9600);
@@ -103,7 +120,7 @@ void setup()
   lora.setMode(MODE_NORMAL);
   delay(10);
   initializeSHT45();
-  initializeSCD30(1);
+  initializeSCD30(asc_state);
   delay(2000); // Wait for sensor stabilization
   configureSCD30();
   // airSensor.setAutoSelfCalibration(1);
@@ -124,6 +141,7 @@ uint16_t co2d;
 uint16_t co2;
 uint8_t id;
 sensordata encdata;
+sensordata cmddata;
 rfpacket txdata;
 rfpacket rxdata;
 
@@ -134,24 +152,38 @@ void loop()
     t0 = millis();
     getSHT45Data();
     getSCD30Data();
-    encdata = encodeData(t45, rh45, co2, DEVICE_ID);
+    encdata = encodeData(t45, rh45, co2, 0);
   };
 
-  if (millis() - accesstime > randtime)
-  { // random acces RF transmit
-    txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
-    lora.sendData(txdata.rfbuf, 8); /// send over RF
-    // printrfbuf(txdata);
-    // lora.receiveData(encdata.buf,5);
-    // printencdata(encdata);
-    // memcpy(rxdata.rfbuf, txdata.rfbuf, sizeof(rxdata.rfbuf));
-    // decodeData(txdata.rfpacket.payload, td, rhd, co2d, id);
-    randvalue = xorshift64(&state);
-    randtime = mapToRange(randvalue, 250, 15000); // random access time
-    nextime = randtime;
-    printrfdata(txdata);
-    accesstime = millis();
+  if (lora.receiveData(cmddata.buf, 5) == 5)
+  {
+    command check;
+    check.cmd = cmddata.parts.id;
+    if (check.fields.id == DEVICE_ID)
+    {
+      if (check.fields.asc != asc_state)
+      {
+        asc_state = check.fields.asc;
+      }
+      txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
+      lora.sendData(txdata.rfbuf, 8); /// send over RF
+    }
   }
+  // if (millis() - accesstime > randtime)
+  // { // random acces RF transmit
+  //   txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
+  //   lora.sendData(txdata.rfbuf, 8); /// send over RF
+  //   // printrfbuf(txdata);
+  //   // lora.receiveData(encdata.buf,5);
+  //   // printencdata(encdata);
+  //   // memcpy(rxdata.rfbuf, txdata.rfbuf, sizeof(rxdata.rfbuf));
+  //   // decodeData(txdata.rfpacket.payload, td, rhd, co2d, id);
+  //   randvalue = xorshift64(&state);
+  //   randtime = mapToRange(randvalue, 250, 15000); // random access time
+  //   nextime = randtime;
+  //   printrfdata(txdata);
+  //   accesstime = millis();
+  // }
   delay(1);
 }
 
@@ -473,11 +505,27 @@ uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max)
 
 rfpacket makepacket(uint8_t addr_h, uint8_t addr_l, uint8_t ch, sensordata sd)
 {
-
+  command tx;
+  tx.fields.id = DEVICE_ID;
+  tx.fields.asc = asc_state;
+  tx.fields.checksum = 0;
+  // tx.fields.checksum = even_parity(encdata.buf[0]) ^ even_parity(encdata.buf[1]) ^ even_parity(encdata.buf[2]);
+  // tx.fields.checksum += ((even_parity(encdata.buf[3]) ^ even_parity(encdata.buf[4])) << 1);
+  sd.parts.id = tx.cmd;
   rfpacket x;
   x.rfpacket.addrh = addr_h;
   x.rfpacket.addrl = addr_l;
   x.rfpacket.channel = ch;
   x.rfpacket.payload = sd;
   return x;
+}
+
+// Function to compute even parity for a single byte
+uint8_t even_parity(uint8_t byte)
+{
+  // XOR all bits together
+  byte ^= byte >> 4;
+  byte ^= byte >> 2;
+  byte ^= byte >> 1;
+  return byte & 0x01; // Return the least significant bit as the parity
 }
