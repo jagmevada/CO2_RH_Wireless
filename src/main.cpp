@@ -5,16 +5,21 @@
 #include <lora_e32.h>
 #include <sht45.h>
 #include "SparkFun_SCD30_Arduino_Library.h"
+#include <EEPROM.h>
 
 #define SLAVE
 
+#define ASC_EEPROM_ADDR 0x01
 #define MASTER_ADDR 0
 #define DEVICE_ID 0
-#define SENSOR_ADDR_OFFSET 0X10
+#define SENSOR_ADDR_OFFSET 0x10
+#define SENSOR_CHANNEL_OFFSET 0x10
+
 #ifdef MASTER
 #define DEVICE_ADDR MASTER_ADDR
 #else
 #define DEVICE_ADDR SENSOR_ADDR_OFFSET + DEVICE_ID
+#define CHANNEL_OFFSET SENSOR_CHANNEL_OFFSET + ((DEVICE_ID) << 1)
 #endif
 
 #define RFCHANNEL 20
@@ -26,6 +31,9 @@
 #define AUX 1
 #define M1 2
 #define M0 3
+
+#define CRC16_POLY 0x8005
+#define CRC16_INIT 0xFFFF
 
 LORA_E32 lora(Serial1, M0, M1, AUX);
 
@@ -89,6 +97,11 @@ uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max);
 void printrfbuf(rfdata xdata);
 void printencdata(sensordata r);
 uint8_t even_parity(uint8_t byte);
+uint8_t read_asc_eerpom();
+void encode_data_with_crc(uint8_t data, uint8_t *encoded);
+uint16_t verify_data_with_crc(uint8_t data, const uint8_t *encoded);
+uint16_t compute_crc16(uint8_t data);
+
 // uint8_t addrh = 0xdd;
 // uint8_t addrl = 0xee;
 uint8_t channel = 0x11;
@@ -96,14 +109,19 @@ uint64_t state = 1234567890123456789ULL;
 uint64_t randvalue;
 uint32_t randtime, nextime;
 uint64_t accesstime, t0;
-uint8_t asc_state = 1;
 uint8_t present_asc_state = 0;
+uint8_t asc_state = ASC;
+uint8_t eeprom_flashed = 0;
 void setup()
 {
   Serial.begin(9600);
+
+  asc_state = read_asc_eerpom();
   lora.begin(9600);
   delay(100);
   Serial.println("init...");
+  Serial.print("Device ID\t\t:\t");
+  Serial.print(DEVICE_ID);
   Wire.begin();
 
   // Set the module to normal mode
@@ -127,9 +145,9 @@ void setup()
   Serial.println();
   printSCD30Settings();
 
-  randvalue = xorshift64(&state);
-  randtime = mapToRange(randvalue, 0, 15000);
-  accesstime = millis();
+  // randvalue = xorshift64(&state);
+  // randtime = mapToRange(randvalue, 0, 15000);
+  // accesstime = millis();
   getSHT45Data();
   getSCD30Data();
   t0 = millis();
@@ -157,16 +175,31 @@ void loop()
 
   if (lora.receiveData(cmddata.buf, 5) == 5)
   {
-    command check;
+    command check, check1, check0;
     check.cmd = cmddata.parts.id;
-    if (check.fields.id == DEVICE_ID)
+    check0.cmd = cmddata.buf[0];
+    check1.cmd = cmddata.buf[1];
+
+    if (((check.fields.id == DEVICE_ID) + (check0.fields.id == DEVICE_ID) + (check1.fields.id == DEVICE_ID)) >= 2)
     {
-      if (check.fields.asc != asc_state)
+      if (((check.fields.asc != asc_state) + (check0.fields.asc != asc_state) + (check1.fields.asc != asc_state)) >= 2)
       {
-        asc_state = check.fields.asc;
+        asc_state ^= 1;
+        EEPROM.write(ASC_EEPROM_ADDR, asc_state);
+        delay(10);
+        initializeSCD30(asc_state);
+        txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
+        lora.sendData(txdata.rfbuf, 8); /// send over RF
+        delay(2000);                    // Wait for sensor stabilization
+        configureSCD30();
+        Serial.println();
+        printSCD30Settings();
       }
-      txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
-      lora.sendData(txdata.rfbuf, 8); /// send over RF
+      else
+      {
+        txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
+        lora.sendData(txdata.rfbuf, 8); /// send over RF
+      }
     }
   }
   // if (millis() - accesstime > randtime)
@@ -424,7 +457,7 @@ void setuplora()
   Serial.println("\n\nSetparameter:");
 
   // lora.printparameter(buffer, 6);
-  lora.setParameters(RFADDRH, RFADDRL + DEVICE_ADDR, sped, RFCHANNEL, option); // set my address
+  lora.setParameters(RFADDRH, RFADDRL + DEVICE_ADDR, sped, RFCHANNEL + CHANNEL_OFFSET, option); // set my address
   // delay(10);
 
   // delay(100);
@@ -506,7 +539,7 @@ uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max)
 rfpacket makepacket(uint8_t addr_h, uint8_t addr_l, uint8_t ch, sensordata sd)
 {
   command tx;
-  tx.fields.id = DEVICE_ID;
+  tx.fields.id = addr_l - (RFADDRL + SENSOR_ADDR_OFFSET);
   tx.fields.asc = asc_state;
   tx.fields.checksum = 0;
   // tx.fields.checksum = even_parity(encdata.buf[0]) ^ even_parity(encdata.buf[1]) ^ even_parity(encdata.buf[2]);
@@ -528,4 +561,61 @@ uint8_t even_parity(uint8_t byte)
   byte ^= byte >> 2;
   byte ^= byte >> 1;
   return byte & 0x01; // Return the least significant bit as the parity
+}
+
+uint8_t read_asc_eerpom()
+{
+  uint8_t asc_addr = ASC_EEPROM_ADDR;
+  if (EEPROM.read(0xff) == 255)
+  {
+    eeprom_flashed = 1;
+    EEPROM.write(0xff, 1);
+    delay(10);
+    EEPROM.write(asc_addr, asc_state);
+    delay(10);
+    Serial.println("EEPROM Flashed");
+    return asc_state;
+  }
+  else
+  {
+    Serial.println("EEPROM retained");
+    return EEPROM.read(asc_addr);
+  }
+}
+
+// Function to compute CRC16-CCITT for a single byte of data
+uint16_t compute_crc16(uint8_t data)
+{
+  uint16_t crc = CRC16_INIT;
+  crc ^= (uint16_t)data << 8;
+
+  for (uint8_t i = 0; i < 8; ++i)
+  {
+    if (crc & 0x8000)
+    {
+      crc = (crc << 1) ^ CRC16_POLY;
+    }
+    else
+    {
+      crc = crc << 1;
+    }
+  }
+  return crc;
+}
+
+// Function to encode data with CRC16
+void encode_data_with_crc(uint8_t data, uint8_t *encoded)
+{
+  uint16_t crc = compute_crc16(data);
+  encoded[0] = (crc >> 8) & 0xFF; // High byte of CRC
+  encoded[1] = crc & 0xFF;        // Low byte of CRC
+}
+
+// Function to verify data with CRC16
+uint16_t verify_data_with_crc(uint8_t data, const uint8_t *encoded)
+{
+  uint16_t crc = compute_crc16(data);
+  uint16_t received_crc = (encoded[0] << 8) | encoded[1];
+
+  return crc == received_crc; // Return 1 if valid, 0 if invalid
 }
