@@ -19,7 +19,7 @@
 #define DEVICE_ADDR 0x10 + DEVICE_ID
 #endif
 
-#define RFCHANNEL 20
+#define RFCHANNEL 0x05
 #define RFADDRL 0x11
 #define RFADDRH 0x44
 #define READ_INTERVAL 2500
@@ -130,7 +130,7 @@ void setup()
   lora.getversion();
   delay(10);
   lora.setMode(MODE_NORMAL);
-  delay(10);
+  delay(200);
   t0 = millis();
 }
 
@@ -151,19 +151,19 @@ void loop()
   // txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
   // lora.sendData(txdata.rfbuf, 8); /// send over RF
   // printrfbuf(txdata);
-  for (uint8_t i = 0; i < 25; i++)
+  for (uint8_t i = 1; i < 26; i++)
   {
     encdata = encodeData(t45, rh45, co2, 0);
-    txdata = makepacket(RFADDRH, RFADDRL + SENSOR_ADDR_OFFSET + i, RFCHANNEL + SENSOR_CHANNEL_OFFSET + (i << 1), encdata);
+    txdata = makepacket(RFADDRH, RFADDRL + SENSOR_ADDR_OFFSET + i, RFCHANNEL + i, encdata);
     // printrfdata(txdata);
     lora.sendData(txdata.rfbuf, 8); /// send over RF
     // Serial.println();
-    // Serial.print("sent to : ");
-    // Serial.print(i);
+    Serial.print("sent to : ");
+    Serial.println(i);
     delay(500);
     if (lora.receiveData(encdata.buf, 5) == 5)
     {
-      // Serial.print("\t");
+      // Serial.print("\tresp ");
       printencdata(encdata);
     }
   }
@@ -514,8 +514,8 @@ rfpacket makepacket(uint8_t addr_h, uint8_t addr_l, uint8_t ch, sensordata sd)
   sd.buf[1] = tx.cmd;
   sd.buf[2] = tx.cmd;
   sd.buf[3] = tx.cmd;
-  sd.parts.id = tx.cmd;
-  // sd.buf[4] = tx.cmd;
+  // sd.parts.id = tx.cmd;
+  sd.buf[4] = tx.cmd;
   // uint8_t encoded[2]; // 2-byte field for error
   // encode_data_with_crc(tx.cmd, encoded);
   // sd.buf[0] = encoded[0];
