@@ -94,7 +94,7 @@ void LORA_E32::readParameters()
 {
   uint8_t command[] = {0xC1, 0xC1, 0xC1}; // Read parameters command
   sendData(command, 3);
-  delay(50);
+  delay(100);
   uint8_t buffer[6]; // Expect 6 bytes of response
   if (receiveData(buffer, 6) == 6)
   {
@@ -112,7 +112,7 @@ void LORA_E32::setParameters(uint8_t addrh, uint8_t addrl, SPED sped,
 {
   uint8_t command[] = {0xC0, addrh, addrl, sped.byte, channel, option.byte};
   sendData(command, 6);
-  delay(50);
+  delay(100);
   uint8_t buffer[6];
   if (receiveData(buffer, 6) == 6)
   {
@@ -120,7 +120,8 @@ void LORA_E32::setParameters(uint8_t addrh, uint8_t addrl, SPED sped,
   }
   else
   {
-    Serial.println("Failed to read parameters.");
+    Serial.print("Failed to read parameters.");
+    Serial.println(Serial1.available());
   }
 }
 

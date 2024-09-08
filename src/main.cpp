@@ -11,7 +11,7 @@
 
 #define ASC_EEPROM_ADDR 0x01
 #define MASTER_ADDR 0
-#define DEVICE_ID 25
+#define DEVICE_ID 22
 #define SENSOR_ADDR_OFFSET 0x10
 #define SENSOR_CHANNEL_OFFSET 0x05
 
@@ -115,7 +115,7 @@ uint8_t eeprom_flashed = 0;
 void setup()
 {
   Serial.begin(9600);
-
+  EEPROM.begin();
   asc_state = read_asc_eerpom();
   lora.begin(9600);
   delay(100);
@@ -126,14 +126,15 @@ void setup()
 
   // Set the module to normal mode
   lora.reset();
+  delay(10);
   lora.setMode(MODE_SETUP);
-
   // lora.readParameters();
-  setuplora();
 
   // lora.setMode(MODE_NORMAL);
   delay(10);
   lora.getversion();
+  delay(10);
+  setuplora();
   delay(10);
   lora.setMode(MODE_NORMAL);
   delay(10);
@@ -171,6 +172,7 @@ void loop()
     getSHT45Data();
     getSCD30Data();
     encdata = encodeData(t45, rh45, co2, 0);
+    printencdata(encdata);
   };
 
   if (lora.receiveData(cmddata.buf, 5) == 5)
@@ -179,11 +181,18 @@ void loop()
     check.cmd = cmddata.parts.id;
     check0.cmd = cmddata.buf[0];
     check1.cmd = cmddata.buf[1];
+    Serial.println(cmddata.buf[0], HEX);
+    Serial.println(cmddata.buf[1], HEX);
+    Serial.println(cmddata.buf[2], HEX);
+    Serial.println(cmddata.buf[3], HEX);
+    Serial.println(cmddata.buf[4], HEX);
 
     if (((check.fields.id == DEVICE_ID) + (check0.fields.id == DEVICE_ID) + (check1.fields.id == DEVICE_ID)) >= 2)
     {
+
       if (((check.fields.asc != asc_state) + (check0.fields.asc != asc_state) + (check1.fields.asc != asc_state)) >= 2)
       {
+        // Serial.println(cmddata.parts.id, HEX);
         asc_state ^= 1;
         EEPROM.write(ASC_EEPROM_ADDR, asc_state);
         delay(10);
@@ -197,7 +206,9 @@ void loop()
       }
       else
       {
+        // Serial.println(check.fields.id, HEX);
         txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
+        printrfdata(txdata);
         lora.sendData(txdata.rfbuf, 8); /// send over RF
       }
     }
@@ -408,6 +419,8 @@ void printSensorData()
 
 void printrfdata(rfpacket r)
 {
+  command c;
+  c.cmd = r.rfpacket.payload.parts.id;
   // Print data in one line with labels, commas, and spaces
   Serial.print("ID: 0x");
   Serial.print(r.rfpacket.addrh, HEX);
@@ -420,8 +433,10 @@ void printrfdata(rfpacket r)
   Serial.print(r.rfpacket.payload.parts.humidityScaled / 10.0, 1);
   Serial.print("%\tCO2: ");
   Serial.print(r.rfpacket.payload.parts.co2);
-  Serial.print("ppm\tID: ");
-  Serial.print(r.rfpacket.payload.parts.id);
+  Serial.print("ppm\tASC: ");
+  Serial.print(c.fields.asc);
+  Serial.print("\tID: ");
+  Serial.print(c.fields.id);
   Serial.print("\tt:");
   Serial.println(nextime);
 }
