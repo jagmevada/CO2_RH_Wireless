@@ -1,4 +1,3 @@
-
 #include <Arduino.h>
 #include <SD.h>
 #include <Wire.h>
@@ -11,7 +10,7 @@
 
 #define ASC_EEPROM_ADDR 0x01
 #define MASTER_ADDR 0
-#define DEVICE_ID 22
+#define DEVICE_ID 5
 #define SENSOR_ADDR_OFFSET 0x10
 #define SENSOR_CHANNEL_OFFSET 0x05
 
@@ -27,14 +26,14 @@
 #define RFADDRH 0x44
 #define READ_INTERVAL 2500
 
+#define FRC 0
 #define ASC 1
 #define AUX 1
 #define M1 2
 #define M0 3
 
-#define CRC16_POLY 0x8005
-#define CRC16_INIT 0xFFFF
-
+// CRC-8 polynomial (0x07 or 0x1D for other common CRC-8 variants)
+#define CRC8_POLY 0x07
 LORA_E32 lora(Serial1, M0, M1, AUX);
 
 SHT45 sht45(&Wire, 0x44); // SHT45-AD1B => 0x44
@@ -45,22 +44,23 @@ typedef union
   uint8_t cmd;
   struct
   {
-    uint8_t checksum : 2; // LSB
+    uint8_t frc : 1; // LSB
     uint8_t asc : 1;
-    uint8_t id : 5; // MSB
+    uint8_t id : 6; // MSB
   } fields;
 } command;
 
 typedef union
 {
   // uint32_t encoded;  // 32-bit integer representation
-  uint8_t buf[5];
+  uint8_t buf[6];
   struct
   {
     uint16_t temperatureScaled : 9; // 9 bits for temperature (0-450)
     uint16_t humidityScaled : 10;   // 10 bits for humidity (0-1000)
     uint16_t co2 : 13;              // 13 bits for CO2 (400-5000)
     uint8_t id : 8;                 // command asc_state,  device id and parity
+    uint8_t crc : 8;
   } parts;
 } sensordata;
 
@@ -75,7 +75,7 @@ typedef struct
 typedef union rfdata
 {
   datapack rfpacket; // Structured packet
-  uint8_t rfbuf[8];  // Buffer for raw data, should match the size of datapack
+  uint8_t rfbuf[9];  // Buffer for raw data, should match the size of datapack
 } rfpacket;
 // Define a union to overlay a 32-bit integer with the three components
 
@@ -98,9 +98,7 @@ void printrfbuf(rfdata xdata);
 void printencdata(sensordata r);
 uint8_t even_parity(uint8_t byte);
 uint8_t read_asc_eerpom();
-void encode_data_with_crc(uint8_t data, uint8_t *encoded);
-uint16_t verify_data_with_crc(uint8_t data, const uint8_t *encoded);
-uint16_t compute_crc16(uint8_t data);
+uint8_t compute_crc8(const uint8_t *data, size_t length);
 
 // uint8_t addrh = 0xdd;
 // uint8_t addrl = 0xee;
@@ -111,12 +109,14 @@ uint32_t randtime, nextime;
 uint64_t accesstime, t0;
 uint8_t present_asc_state = 0;
 uint8_t asc_state = ASC;
+uint8_t frc_state = FRC;
 uint8_t eeprom_flashed = 0;
 void setup()
 {
   Serial.begin(9600);
   EEPROM.begin();
   asc_state = read_asc_eerpom();
+  frc_state = FRC;
   lora.begin(9600);
   delay(100);
   Serial.println("init...");
@@ -166,6 +166,7 @@ rfpacket rxdata;
 
 void loop()
 {
+  static bool ascupdate = 1, frcupdate = 1;
   if (millis() - t0 > READ_INTERVAL)
   { /// independent sensor reading
     t0 = millis();
@@ -175,44 +176,66 @@ void loop()
     printencdata(encdata);
   };
 
-  if (lora.receiveData(cmddata.buf, 5) == 5)
+  if (lora.receiveData(cmddata.buf, 6) == 6)
   {
-    command check, check1, check0;
-    check.cmd = cmddata.parts.id;
-    check0.cmd = cmddata.buf[0];
-    check1.cmd = cmddata.buf[1];
-    Serial.println(cmddata.buf[0], HEX);
-    Serial.println(cmddata.buf[1], HEX);
-    Serial.println(cmddata.buf[2], HEX);
-    Serial.println(cmddata.buf[3], HEX);
-    Serial.println(cmddata.buf[4], HEX);
-
-    if (((check.fields.id == DEVICE_ID) + (check0.fields.id == DEVICE_ID) + (check1.fields.id == DEVICE_ID)) >= 2)
+    command check;
+    if (compute_crc8(cmddata.buf, 6) == 0) // crc ok
     {
 
-      if (((check.fields.asc != asc_state) + (check0.fields.asc != asc_state) + (check1.fields.asc != asc_state)) >= 2)
+      check.cmd = cmddata.parts.id;
+      if ((check.fields.asc != asc_state) && ascupdate)
       {
+
         // Serial.println(cmddata.parts.id, HEX);
         asc_state ^= 1;
         EEPROM.write(ASC_EEPROM_ADDR, asc_state);
         delay(10);
         initializeSCD30(asc_state);
         txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
-        lora.sendData(txdata.rfbuf, 8); /// send over RF
+        lora.sendData(txdata.rfbuf, 9); /// send over RF
         delay(2000);                    // Wait for sensor stabilization
         configureSCD30();
+        delay(100);
         Serial.println();
         printSCD30Settings();
+        ascupdate = 0;
+      }
+      else if ((check.fields.frc == 1) && frcupdate)
+      {
+        if ((cmddata.parts.co2 > 390) && (cmddata.parts.co2 < 1501))
+        {
+          if (airSensor.setForcedRecalibrationFactor(cmddata.parts.co2))
+          {
+            Serial.println("failed to force calibrate");
+          };
+          frc_state = 1;
+          frcupdate = 0;
+        }
+        else
+        {
+          frc_state = 0;
+          frcupdate = 1;
+        }
+        // encdata.parts.co2 = 0;
+        txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
+        lora.sendData(txdata.rfbuf, 9); /// send over RF
       }
       else
       {
         // Serial.println(check.fields.id, HEX);
         txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
         printrfdata(txdata);
-        lora.sendData(txdata.rfbuf, 8); /// send over RF
+        lora.sendData(txdata.rfbuf, 9); /// send over RF
+        frcupdate = 1;
+        ascupdate = 1;
       }
     }
+    else
+    {
+      Serial.println("Received CRC failed ");
+    }
   }
+
   // if (millis() - accesstime > randtime)
   // { // random acces RF transmit
   //   txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
@@ -391,6 +414,8 @@ void printrfbuf(rfdata xdata)
   Serial.print(xdata.rfbuf[6], HEX);
   Serial.print("-");
   Serial.println(xdata.rfbuf[7], HEX);
+  Serial.print("-");
+  Serial.println(xdata.rfbuf[8], HEX);
 }
 void printSensorData()
 {
@@ -553,13 +578,16 @@ uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max)
 
 rfpacket makepacket(uint8_t addr_h, uint8_t addr_l, uint8_t ch, sensordata sd)
 {
+  uint8_t checksum;
   command tx;
   tx.fields.id = DEVICE_ID; // addr_l - (RFADDRL + SENSOR_ADDR_OFFSET);
   tx.fields.asc = asc_state;
-  tx.fields.checksum = 0;
-  // tx.fields.checksum = even_parity(encdata.buf[0]) ^ even_parity(encdata.buf[1]) ^ even_parity(encdata.buf[2]);
-  // tx.fields.checksum += ((even_parity(encdata.buf[3]) ^ even_parity(encdata.buf[4])) << 1);
+  tx.fields.frc = frc_state;
+
   sd.parts.id = tx.cmd;
+  sd.parts.crc = 0;
+  checksum = compute_crc8(sd.buf, 5);
+  sd.buf[5] = checksum;
   rfpacket x;
   x.rfpacket.addrh = addr_h;
   x.rfpacket.addrl = addr_l;
@@ -598,39 +626,26 @@ uint8_t read_asc_eerpom()
   }
 }
 
-// Function to compute CRC16-CCITT for a single byte of data
-uint16_t compute_crc16(uint8_t data)
+// Function to compute CRC-8
+uint8_t compute_crc8(const uint8_t *data, size_t length)
 {
-  uint16_t crc = CRC16_INIT;
-  crc ^= (uint16_t)data << 8;
+  uint8_t crc = 0xFF; // Initial value (can be 0x00 or 0xFF depending on the CRC specification)
 
-  for (uint8_t i = 0; i < 8; ++i)
+  for (size_t i = 0; i < length; ++i)
   {
-    if (crc & 0x8000)
+    crc ^= data[i]; // XOR byte into the CRC
+
+    for (uint8_t bit = 0; bit < 8; ++bit)
     {
-      crc = (crc << 1) ^ CRC16_POLY;
-    }
-    else
-    {
-      crc = crc << 1;
+      if (crc & 0x80)
+      {                               // If the MSB is set
+        crc = (crc << 1) ^ CRC8_POLY; // Shift and XOR with polynomial
+      }
+      else
+      {
+        crc <<= 1; // Just shift
+      }
     }
   }
   return crc;
-}
-
-// Function to encode data with CRC16
-void encode_data_with_crc(uint8_t data, uint8_t *encoded)
-{
-  uint16_t crc = compute_crc16(data);
-  encoded[0] = (crc >> 8) & 0xFF; // High byte of CRC
-  encoded[1] = crc & 0xFF;        // Low byte of CRC
-}
-
-// Function to verify data with CRC16
-uint16_t verify_data_with_crc(uint8_t data, const uint8_t *encoded)
-{
-  uint16_t crc = compute_crc16(data);
-  uint16_t received_crc = (encoded[0] << 8) | encoded[1];
-
-  return crc == received_crc; // Return 1 if valid, 0 if invalid
 }
