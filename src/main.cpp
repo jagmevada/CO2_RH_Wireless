@@ -6,6 +6,7 @@
 #include <sht45.h>
 #include "SparkFun_SCD30_Arduino_Library.h"
 #include <EEPROM.h>
+
 #define MASTER
 
 #define MASTER_ADDR 0
@@ -24,14 +25,14 @@
 #define RFADDRH 0x44
 #define READ_INTERVAL 2500
 
+#define FRC 0
 #define ASC 1
 #define AUX 1
 #define M1 2
 #define M0 3
 
-// CRC16-CCITT polynomial (0x8005) and initial value
-#define CRC16_POLY 0x8005
-#define CRC16_INIT 0xFFFF
+// CRC-8 polynomial (0x07 or 0x1D for other common CRC-8 variants)
+#define CRC8_POLY 0x07
 
 LORA_E32 lora(Serial1, M0, M1, AUX);
 
@@ -43,22 +44,23 @@ typedef union
   uint8_t cmd;
   struct
   {
-    uint8_t checksum : 2; // LSB
+    uint8_t frc : 1; // LSB
     uint8_t asc : 1;
-    uint8_t id : 5; // MSB
+    uint8_t id : 6; // MSB
   } fields;
 } command;
 
 typedef union
 {
   // uint32_t encoded;  // 32-bit integer representation
-  uint8_t buf[5];
+  uint8_t buf[6];
   struct
   {
     uint16_t temperatureScaled : 9; // 9 bits for temperature (0-450)
     uint16_t humidityScaled : 10;   // 10 bits for humidity (0-1000)
     uint16_t co2 : 13;              // 13 bits for CO2 (400-5000)
     uint8_t id : 8;                 // command asc_state,  device id and parity
+    uint8_t crc : 8;
   } parts;
 } sensordata;
 
@@ -73,7 +75,7 @@ typedef struct
 typedef union rfdata
 {
   datapack rfpacket; // Structured packet
-  uint8_t rfbuf[8];  // Buffer for raw data, should match the size of datapack
+  uint8_t rfbuf[9];  // Buffer for raw data, should match the size of datapack
 } rfpacket;
 // Define a union to overlay a 32-bit integer with the three components
 
@@ -97,10 +99,11 @@ void printencdata(sensordata r);
 
 uint8_t even_parity(uint8_t byte); // even parity check
 uint8_t read_asc_eerpom();
-void encode_data_with_crc(uint8_t data, uint8_t *encoded);
-uint16_t verify_data_with_crc(uint8_t data, const uint8_t *encoded);
-uint16_t compute_crc16(uint8_t data);
+uint8_t compute_crc8(const uint8_t *data, size_t length);
+sensordata setFRCSettings();
+String readStringFromSerial();
 
+void setmode();
 // uint8_t addrh = 0xdd;
 // uint8_t addrl = 0xee;
 uint8_t channel = 0x11;
@@ -109,11 +112,13 @@ uint64_t randvalue;
 uint32_t randtime, nextime;
 uint64_t accesstime, t0;
 uint8_t asc_state = ASC;
+uint8_t frc_state = FRC;
 uint8_t eeprom_flashed = 0;
 void setup()
 {
   Serial.begin(9600);
   asc_state = read_asc_eerpom();
+  frc_state = FRC;
   lora.begin(9600);
   delay(100);
   Serial.println("init...");
@@ -151,17 +156,24 @@ void loop()
   // txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
   // lora.sendData(txdata.rfbuf, 8); /// send over RF
   // printrfbuf(txdata);
+  asc_state = ASC;
+  frc_state = FRC;
+  while (1)
+  {
+    setmode();
+  }
+
   for (uint8_t i = 1; i < 26; i++)
   {
     encdata = encodeData(t45, rh45, co2, 0);
     txdata = makepacket(RFADDRH, RFADDRL + SENSOR_ADDR_OFFSET + i, RFCHANNEL + i, encdata);
     // printrfdata(txdata);
-    lora.sendData(txdata.rfbuf, 8); /// send over RF
+    lora.sendData(txdata.rfbuf, 9); /// send over RF
     // Serial.println();
     Serial.print("sent to : ");
     Serial.println(i);
     delay(500);
-    if (lora.receiveData(encdata.buf, 5) == 5)
+    if (lora.receiveData(encdata.buf, 6) == 6)
     {
       // Serial.print("\tresp ");
       printencdata(encdata);
@@ -339,6 +351,8 @@ void printrfbuf(rfdata xdata)
   Serial.print(xdata.rfbuf[6], HEX);
   Serial.print("-");
   Serial.println(xdata.rfbuf[7], HEX);
+  Serial.print("-");
+  Serial.println(xdata.rfbuf[8], HEX);
 }
 void printSensorData()
 {
@@ -402,6 +416,8 @@ void printencdata(sensordata r)
   Serial.print(r.parts.co2);
   Serial.print("ppm\tASC: ");
   Serial.print(x.fields.asc);
+  Serial.print("\tFRC: ");
+  Serial.print(x.fields.frc);
   Serial.print("\tID: ");
   Serial.println(x.fields.id);
 }
@@ -504,27 +520,15 @@ uint32_t mapToRange(uint64_t randomValue, uint32_t min, uint32_t max)
 
 rfpacket makepacket(uint8_t addr_h, uint8_t addr_l, uint8_t ch, sensordata sd)
 {
-
+  uint8_t checksum;
   command tx;
   tx.fields.id = addr_l - (RFADDRL + SENSOR_ADDR_OFFSET);
   tx.fields.asc = asc_state;
-  tx.fields.checksum = 0;
+  tx.fields.frc = frc_state;
 
-  sd.buf[0] = tx.cmd;
-  sd.buf[1] = tx.cmd;
-  sd.buf[2] = tx.cmd;
-  sd.buf[3] = tx.cmd;
-  // sd.parts.id = tx.cmd;
-  sd.buf[4] = tx.cmd;
-  // uint8_t encoded[2]; // 2-byte field for error
-  // encode_data_with_crc(tx.cmd, encoded);
-  // sd.buf[0] = encoded[0];
-  // sd.buf[1] = encoded[1];
-  // Serial.print("CRC result: ");
-  // Serial.println(verify_data_with_crc(tx.cmd, sd.buf));
-  // tx.fields.checksum = even_parity(encdata.buf[0]) ^ even_parity(encdata.buf[1]) ^ even_parity(encdata.buf[2]);
-  // tx.fields.checksum += ((even_parity(encdata.buf[3]) ^ even_parity(encdata.buf[4])) << 1);
-
+  sd.parts.id = tx.cmd;
+  sd.parts.crc = 0;
+  sd.buf[5] = compute_crc8(sd.buf, 5);
   rfpacket x;
   x.rfpacket.addrh = addr_h;
   x.rfpacket.addrl = addr_l;
@@ -563,39 +567,221 @@ uint8_t read_asc_eerpom()
   }
 }
 
-// Function to compute CRC16-CCITT for a single byte of data
-uint16_t compute_crc16(uint8_t data)
+// Function to compute CRC-8
+uint8_t compute_crc8(const uint8_t *data, size_t length)
 {
-  uint16_t crc = CRC16_INIT;
-  crc ^= (uint16_t)data << 8;
+  uint8_t crc = 0xFF; // Initial value (can be 0x00 or 0xFF depending on the CRC specification)
 
-  for (uint8_t i = 0; i < 8; ++i)
+  for (size_t i = 0; i < length; ++i)
   {
-    if (crc & 0x8000)
+    crc ^= data[i]; // XOR byte into the CRC
+
+    for (uint8_t bit = 0; bit < 8; ++bit)
     {
-      crc = (crc << 1) ^ CRC16_POLY;
-    }
-    else
-    {
-      crc = crc << 1;
+      if (crc & 0x80)
+      {                               // If the MSB is set
+        crc = (crc << 1) ^ CRC8_POLY; // Shift and XOR with polynomial
+      }
+      else
+      {
+        crc <<= 1; // Just shift
+      }
     }
   }
   return crc;
 }
 
-// Function to encode data with CRC16
-void encode_data_with_crc(uint8_t data, uint8_t *encoded)
+// Helper function to read a complete line from Serial
+String readStringFromSerial()
 {
-  uint16_t crc = compute_crc16(data);
-  encoded[0] = (crc >> 8) & 0xFF; // High byte of CRC
-  encoded[1] = crc & 0xFF;        // Low byte of CRC
+  String input = "";
+
+  while (true)
+  {
+    if (Serial.available())
+    {
+      char c = Serial.read();
+      if (c == '\n' || c == '\r')
+      {
+        // End of line, return the collected input
+        return input;
+      }
+      else
+      {
+        // Append character to the input string
+        input += c;
+      }
+    }
+    // Small delay to avoid busy-waiting
+    delay(10);
+  }
 }
 
-// Function to verify data with CRC16
-uint16_t verify_data_with_crc(uint8_t data, const uint8_t *encoded)
+sensordata setFRCSettings()
 {
-  uint16_t crc = compute_crc16(data);
-  uint16_t received_crc = (encoded[0] << 8) | encoded[1];
 
-  return crc == received_crc; // Return 1 if valid, 0 if invalid
+  sensordata sdset;
+  command cmd;
+
+  Serial.println("Enter Sensor ID (1 to 50):");
+
+  // Read the sensor ID
+
+  String idInput = readStringFromSerial();
+  int sensorID = idInput.toInt();
+
+  if (sensorID < 1 || sensorID > 50)
+  {
+    Serial.println("Invalid Sensor ID. Please enter a number between 1 and 50.");
+    return;
+  }
+
+  Serial.println("Enter FRC setting (1 for ON, 0 for OFF):");
+
+  // Read the FRC setting
+  String frcInput = readStringFromSerial();
+  int frcSetting = frcInput.toInt();
+
+  if (frcSetting == 1)
+  {
+    Serial.println("Enter CO2 value for forced recalibration (ppm):");
+
+    // Read the CO2 value
+    String co2Input = readStringFromSerial();
+    int co2Value = co2Input.toInt(); // Convert the string to an integer
+
+    // Confirm the entered values
+    Serial.print("Confirm FRC ON with CO2 value ");
+    Serial.print(co2Value);
+    Serial.print(" ppm for Sensor ID ");
+    Serial.print(sensorID);
+    Serial.println("? (Y/N):");
+
+    String confirmationInput = readStringFromSerial();
+    char confirmation = confirmationInput.charAt(0); // Get the first character
+
+    if (confirmation == 'Y' || confirmation == 'y')
+    {
+      // Prepare the command and sensor data structures
+      cmd.cmd = 0;              // Initialize command byte
+      cmd.fields.frc = 1;       // Set FRC to ON
+      cmd.fields.id = sensorID; // Set sensor ID
+
+      sdset.parts.co2 = co2Value;
+
+      // Print or process the data
+      Serial.print("Sensor ID: ");
+      Serial.print(cmd.fields.id);
+      Serial.print("\tCO2: ");
+      Serial.print(sdset.parts.co2);
+      Serial.print("\tFRC: ");
+      Serial.println(cmd.fields.frc);
+
+      Serial.println("Forced recalibration applied successfully.");
+    }
+    else
+    {
+      Serial.println("FRC setting cancelled.");
+    }
+  }
+  else if (frcSetting == 0)
+  {
+    Serial.println("Forced recalibration is turned OFF.");
+
+    // Prepare the command structure for turning off FRC
+    cmd.cmd = 0;              // Initialize command byte
+    cmd.fields.frc = 0;       // Set FRC to OFF
+    cmd.fields.id = sensorID; // Set sensor ID
+
+    // Print or process the data
+    Serial.print("Sensor ID: ");
+    Serial.print(sensorID);
+    Serial.print("\tFRC: ");
+    Serial.println(cmd.fields.frc);
+  }
+  else
+  {
+    Serial.println("Invalid FRC setting. Please enter 1 or 0.");
+  }
+
+  Serial.println();
+  Serial.println("Enter ASC setting (1 for ON, 0 for OFF):");
+
+  // Read the ASC setting
+  String ascInput = readStringFromSerial();
+  int ascSetting = ascInput.toInt();
+
+  if (ascSetting == 1)
+  {
+    cmd.fields.asc = 1; // Set ASC to ON
+  }
+  else if (ascSetting == 0)
+  {
+    cmd.fields.asc = 0; // Set ASC to OFF
+  }
+  else
+  {
+    Serial.println("Invalid ASC setting. Please enter 1 or 0.");
+    return;
+  }
+  sdset.parts.id = cmd.cmd;
+  // Print or process the ASC setting
+  Serial.print("Sensor ID: ");
+  Serial.print(sensorID);
+  Serial.print("\tASC: ");
+  Serial.println(cmd.fields.asc);
+
+  return sdset;
+}
+
+void setmode()
+{
+  static sensordata sdset;
+  command cmd;
+  Serial.println("Press any key to interrupt monitoring");
+  String input = "";
+  static char x = 1;
+  while (x)
+  {
+    if (Serial.available())
+    {
+      char c = Serial.read();
+      if (c == '\n' || c == '\r')
+      {
+        // End of line, return the collected input
+        x = 0;
+      }
+      else
+      {
+        // Append character to the input string
+        input += c;
+      }
+    }
+
+    for (uint8_t i = 1; i < 26; i++)
+    {
+      // encdata = encodeData(t45, rh45, co2, 0);
+      txdata = makepacket(RFADDRH, RFADDRL + SENSOR_ADDR_OFFSET + i, RFCHANNEL + i, sdset);
+      // printrfdata(txdata);
+      lora.sendData(txdata.rfbuf, 9); /// send over RF
+      // Serial.println();
+      Serial.print("sent to : ");
+      Serial.println(i);
+      delay(500);
+      if (lora.receiveData(encdata.buf, 6) == 6)
+      {
+        // Serial.print("\tresp ");
+        printencdata(encdata);
+      }
+    }
+    // Small delay to avoid busy-waiting
+    delay(10);
+  }
+
+  sdset = setFRCSettings();
+  cmd.cmd = sdset.parts.id;
+  asc_state = cmd.fields.asc;
+  frc_state = cmd.fields.frc;
+  printencdata(sdset);
+  delay(500);
 }
