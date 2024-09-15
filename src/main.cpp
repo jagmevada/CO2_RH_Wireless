@@ -6,11 +6,15 @@
 #include "SparkFun_SCD30_Arduino_Library.h"
 #include <EEPROM.h>
 
+// ###################################################################
+// ###################### DEFINED CONSTANTS ##########################
+// ###################################################################
+
 #define SLAVE
 
 #define ASC_EEPROM_ADDR 0x01
 #define MASTER_ADDR 0
-#define DEVICE_ID 5
+#define DEVICE_ID 6
 #define SENSOR_ADDR_OFFSET 0x10
 #define SENSOR_CHANNEL_OFFSET 0x05
 
@@ -34,10 +38,19 @@
 
 // CRC-8 polynomial (0x07 or 0x1D for other common CRC-8 variants)
 #define CRC8_POLY 0x07
+
+// ###################################################################
+// ###################### HARDWARE INITIALIZATION ####################
+// ###################################################################
+
 LORA_E32 lora(Serial1, M0, M1, AUX);
 
 SHT45 sht45(&Wire, 0x44); // SHT45-AD1B => 0x44
 SCD30 airSensor;
+
+// ###################################################################
+// ###################### DATA TYPES #################################
+// ###################################################################
 
 typedef union
 {
@@ -79,6 +92,10 @@ typedef union rfdata
 } rfpacket;
 // Define a union to overlay a 32-bit integer with the three components
 
+// ###################################################################
+// ###################### FUNCTIONS ###################################
+// ####################################################################
+
 // Function declarations
 void initializeSHT45();
 void initializeSCD30(bool asc);
@@ -100,6 +117,10 @@ uint8_t even_parity(uint8_t byte);
 uint8_t read_asc_eerpom();
 uint8_t compute_crc8(const uint8_t *data, size_t length);
 
+// ###################################################################
+// ############## GLOBAL VARIABLES ###################################
+// ###################################################################
+
 // uint8_t addrh = 0xdd;
 // uint8_t addrl = 0xee;
 uint8_t channel = 0x11;
@@ -111,6 +132,20 @@ uint8_t present_asc_state = 0;
 uint8_t asc_state = ASC;
 uint8_t frc_state = FRC;
 uint8_t eeprom_flashed = 0;
+float t45, rh45, ts, rhs;
+float td, rhd;
+uint16_t co2d;
+uint16_t co2;
+uint8_t id;
+sensordata encdata;
+sensordata cmddata;
+rfpacket txdata;
+rfpacket rxdata;
+
+// ###################################################################
+// #######################  SETUP  ###################################
+// ###################################################################
+
 void setup()
 {
   Serial.begin(9600);
@@ -154,15 +189,9 @@ void setup()
   t0 = millis();
 }
 
-float t45, rh45, ts, rhs;
-float td, rhd;
-uint16_t co2d;
-uint16_t co2;
-uint8_t id;
-sensordata encdata;
-sensordata cmddata;
-rfpacket txdata;
-rfpacket rxdata;
+// ###################################################################
+// #######################  LOOP#  ###################################
+// ###################################################################
 
 void loop()
 {
@@ -179,55 +208,75 @@ void loop()
   if (lora.receiveData(cmddata.buf, 6) == 6)
   {
     command check;
-    if (compute_crc8(cmddata.buf, 6) == 0) // crc ok
+    if (compute_crc8(cmddata.buf, 6) == 0) // crc ok?
     {
-
-      check.cmd = cmddata.parts.id;
-      if ((check.fields.asc != asc_state) && ascupdate)
+      if ((cmddata.parts.temperatureScaled == 100) && (cmddata.parts.humidityScaled == 1000)) // valid cmd?
       {
-
-        // Serial.println(cmddata.parts.id, HEX);
-        asc_state ^= 1;
-        EEPROM.write(ASC_EEPROM_ADDR, asc_state);
-        delay(10);
-        initializeSCD30(asc_state);
-        txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
-        lora.sendData(txdata.rfbuf, 9); /// send over RF
-        delay(2000);                    // Wait for sensor stabilization
-        configureSCD30();
-        delay(100);
-        Serial.println();
-        printSCD30Settings();
-        ascupdate = 0;
-      }
-      else if ((check.fields.frc == 1) && frcupdate)
-      {
-        if ((cmddata.parts.co2 > 390) && (cmddata.parts.co2 < 1501))
+        check.cmd = cmddata.parts.id;
+        if ((asc_state != check.fields.asc)) // asc state update cmd?
+        {                                    // change done
+          asc_state = check.fields.asc;
+          EEPROM.write(ASC_EEPROM_ADDR, asc_state);
+          delay(10);
+          initializeSCD30(asc_state);
+          txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
+          lora.sendData(txdata.rfbuf, 9); /// send over RF
+          delay(2000);                    // Wait for sensor stabilization
+          configureSCD30();
+          delay(100);
+          Serial.println();
+          printSCD30Settings();
+          // ascupdate = 0;
+          encdata.parts.temperatureScaled = 101;
+          encdata.parts.humidityScaled = 1001;
+        }
+        else // no change done
         {
-          if (airSensor.setForcedRecalibrationFactor(cmddata.parts.co2))
+          encdata.parts.temperatureScaled = 100;
+          encdata.parts.humidityScaled = 1000;
+        }
+        if (frc_state != check.fields.frc)
+        {
+          if ((check.fields.frc == 1))
           {
-            Serial.println("failed to force calibrate");
-          };
-          frc_state = 1;
-          frcupdate = 0;
+            if ((cmddata.parts.co2 >= 390) && (cmddata.parts.co2 < 1501))
+            {
+              if (airSensor.setForcedRecalibrationFactor(cmddata.parts.co2))
+              {
+                frc_state = 1;
+                encdata.parts.temperatureScaled = 101; // change done
+                encdata.parts.humidityScaled = 1001;
+              }
+              else
+              { // failed to do
+                frc_state = 0;
+                encdata.parts.temperatureScaled = 99;
+                encdata.parts.humidityScaled = 990;
+              }
+              // frcupdate = 0;
+            }
+          }
+          else
+          { // no change done
+            frc_state = 0;
+            encdata.parts.temperatureScaled = 100;
+            encdata.parts.humidityScaled = 1000;
+          }
         }
-        else
-        {
-          frc_state = 0;
-          frcupdate = 1;
-        }
+
         // encdata.parts.co2 = 0;
         txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
         lora.sendData(txdata.rfbuf, 9); /// send over RF
       }
       else
-      {
+      { // normal query
+        frc_state = 0;
         // Serial.println(check.fields.id, HEX);
         txdata = makepacket(RFADDRH, RFADDRL + MASTER_ADDR, RFCHANNEL, encdata);
         printrfdata(txdata);
         lora.sendData(txdata.rfbuf, 9); /// send over RF
-        frcupdate = 1;
-        ascupdate = 1;
+        // frcupdate = 1;
+        // ascupdate = 1;
       }
     }
     else
@@ -256,6 +305,10 @@ void loop()
 
 // put function definitions here:
 // int myFunction(int x, int y) { return x + y; }
+
+// ###################################################################
+// #######################  FUNCTIONS DEFINATION #####################
+// ###################################################################
 
 // Function definitions
 void initializeSHT45()
@@ -444,9 +497,6 @@ void printSensorData()
 
 void printrfdata(rfpacket r)
 {
-  command c;
-  c.cmd = r.rfpacket.payload.parts.id;
-  // Print data in one line with labels, commas, and spaces
   Serial.print("ID: 0x");
   Serial.print(r.rfpacket.addrh, HEX);
   Serial.print(r.rfpacket.addrl, HEX);
@@ -458,11 +508,15 @@ void printrfdata(rfpacket r)
   Serial.print(r.rfpacket.payload.parts.humidityScaled / 10.0, 1);
   Serial.print("%\tCO2: ");
   Serial.print(r.rfpacket.payload.parts.co2);
-  Serial.print("ppm\tASC: ");
-  Serial.print(c.fields.asc);
-  Serial.print("\tID: ");
+  command c;
+  c.cmd = r.rfpacket.payload.parts.id;
+  Serial.print("ppm\tID: ");
   Serial.print(c.fields.id);
-  Serial.print("\tt:");
+  Serial.print("\tASC: ");
+  Serial.print(c.fields.asc);
+  Serial.print("\tFRC: ");
+  Serial.print(c.fields.frc);
+  Serial.print("\ttime:");
   Serial.println(nextime);
 }
 
