@@ -10,6 +10,8 @@
 #include "SparkFun_SCD30_Arduino_Library.h"
 #include <EEPROM.h>
 
+/// @brief Please update Modbus datarate and protocol format/
+/// also disable dummy data for working sensor, presently on rfid-25 working, other are dummy"
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -359,8 +361,8 @@ void loop()
     sx = sensorzero;
     // frame[i - 1] = sx;
     //  delay(500);
-    Serial.print("TX: ");
-    Serial.print(i);
+    // Serial.print("TX: ");
+    // Serial.print(i);
     bool sensor_alive = NO;
     if ((lora.receiveData(encdata.buf, 6) == 6) || FALSE)
     {
@@ -388,36 +390,37 @@ void loop()
         asensor.co2 = sx.data.co2;     // update co2 if valid
         update_holdingregisters(&asensor);
         modsensor[hallid] = asensor; // copyback updated data
-        Serial.print("\t");
-        print_rtusensor(asensor);
+        // Serial.print("\t");
+        // print_rtusensor(asensor);
       } // valid crc
 
     } // lora.received
     if (sensor_alive == NO)
     {
       u8 hallid = rfidtohallid[i - 1];
-      if (modsensor[hallid].isdummy == YES)
+      if ((modsensor[hallid].isdummy == YES) || TRUE)
       {
         rtusensor asensor;
         asensor = modsensor[hallid]; // copy readonly data
         dummysensor(&asensor, i);    // update dummy t,rh,c02
         update_holdingregisters(&asensor);
         modsensor[hallid] = asensor; // copyback updated data
-        Serial.print("\t");
-        print_rtusensor(asensor);
+        // Serial.print("\t");
+        // print_rtusensor(asensor);
       }
     }
     if (i >= MAX_REALSENSOR)
     {
-      Serial.println();
-      Serial.print("TX: ");
-      Serial.print(i + 1);
-      Serial.print("\t");
-      print_rtusensor(modsensor[HALL_AVGID]);
+      // Serial.println();
+      // Serial.print("TX: ");
+      // Serial.print(i + 1);
+      // Serial.print("\t");
+      // print_rtusensor(modsensor[HALL_AVGID]);
+      update_holdingregisters(&modsensor[HALL_AVGID]);
       i = 0;
     }
     timetorfread = 0;
-    Serial.println();
+    // Serial.println();
   }
   delay(1);
   modbus.poll();
@@ -1494,9 +1497,9 @@ void dummysensor(rtusensor *asensor, u8 i)
   randco2 = xorshift64(&state);
   randvalid = xorshift64(&state);
   u16 rt, rrh, rco2, rvalid;
-  rt = mapToRange(randtemp, 240, 250);   // random
-  rrh = mapToRange(randtemp, 400, 410);  // random
-  rco2 = mapToRange(randtemp, 400, 410); // random
+  rt = mapToRange(randtemp, 230, 260);   // random
+  rrh = mapToRange(randtemp, 400, 450);  // random
+  rco2 = mapToRange(randtemp, 500, 501); // random
   rvalid = mapToRange(randtemp, 1, 100); // random
   asensor->temp = rt;
   asensor->humidity = rrh;
