@@ -1,4 +1,4 @@
-
+#include <ModbusRTUSlave.h>
 #include <Arduino.h>
 #include <avr/interrupt.h>
 #include <avr/io.h>
@@ -10,9 +10,20 @@
 #include "SparkFun_SCD30_Arduino_Library.h"
 #include <EEPROM.h>
 
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
 // ###################################################################
 // ###################### DEFINED CONSTANTS ##########################
 // ###################################################################
+#define MODBUS_SERIAL Serial
+#define MODBUS_BAUD 115200
+#define MODBUS_CONFIG SERIAL_8N1
+#define MODBUS_UNIT_ID 10
+#define HOLDREG_COUNT 137
+ModbusRTUSlave modbus(MODBUS_SERIAL);
+u16 holdingRegisters[HOLDREG_COUNT];
 
 #define MASTER
 
@@ -28,17 +39,28 @@
 #endif
 
 #define SETUPTIMEOUT 5000
+#define READ_DELAY 500
+#define SCAN_DELAY 550
+#define RESPONSE_TIMEOUT 60 // seconds
 
 #define RFCHANNEL 0x05
 #define RFADDRL 0x11
 #define RFADDRH 0x44
-#define READ_INTERVAL 2500
 
 #define FRC 0
 #define ASC 1
 #define AUX 1
 #define M1 2
 #define M0 3
+
+#define YES 1
+#define NO 0
+#define SET 1
+#define RESET 0
+#define TRUE 1
+#define FALSE 0
+#define OK 1
+#define NOTOK 0
 
 // CRC-8 polynomial (0x07 or 0x1D for other common CRC-8 variants)
 #define CRC8_POLY 0x07
@@ -55,8 +77,40 @@ SCD30 airSensor;
 // ###################################################################
 // ###################### DATA TYPES #################################
 // ###################################################################
-typedef uint8_t u8;
-typedef uint16_t u16;
+#define MAX_MODSENSOR 55
+#define MAX_REALSENSOR 54 // exclude hallavg
+#define HALL_AVGID 54
+enum loc
+{
+  MALE,
+  FEMALE,
+  PUJYASHRI,
+  AMBIENT,
+  STAGELEFT,
+  STAGERIGHT,
+  STAGEFRONT,
+  HALLAVERAGE
+};
+struct rtusensor
+{
+  u8 startadd;
+  u16 temp;
+  u16 humidity;
+  u16 co2;
+  u8 rfid;
+  u8 hallid;
+  loc location;
+  u8 timeout;
+  bool hasco2;
+  bool addavg;
+  bool istrhok;
+  bool isco2ok;
+  bool isdummy;
+  bool avg_addedlast;
+};
+rtusensor modsensor[MAX_MODSENSOR];
+
+u8 rfidtohallid[MAX_REALSENSOR];
 
 typedef union
 {
@@ -116,7 +170,15 @@ typedef union rfdata
 // ###################################################################
 // ###################### FUNCTIONS ###################################
 // ####################################################################
-
+void update_holdingregisters(rtusensor *asensor);
+void dummysensor(rtusensor *asensor, u8 i);
+void hallaverage();
+void responsetimekeep();
+void mapmodsensors();
+void print_rtusensor(rtusensor sens);
+void setupmodsensor();
+void process_sensor();
+u16 floattoint(float value);
 void initializeSHT45();
 void initializeSCD30(bool asc);
 void configureSCD30();
@@ -170,7 +232,10 @@ sensordata encdata;
 rfpacket txdata;
 rfpacket rxdata;
 uint8_t parity[5];
-
+bool update_data;
+bool responsetimekeep_update;
+bool timetorfsend;
+bool timetorfread;
 const sensordata zero = {
     .parts = {
         .temperatureScaled = 0,
@@ -192,8 +257,10 @@ const sensor sensorzero = {
 
 void setup()
 {
-  disable_watchdog();
-  Serial.begin(9600);
+  MODBUS_SERIAL.begin(MODBUS_BAUD, MODBUS_CONFIG);
+
+  // disable_watchdog();
+  // Serial.begin(9600);
   asc_state = read_asc_eerpom();
   frc_state = FRC;
   lora.begin(9600);
@@ -220,6 +287,34 @@ void setup()
 #ifdef VERBOSE
   checkinput();
 #endif
+
+  modbus.configureHoldingRegisters(holdingRegisters, HOLDREG_COUNT);
+  MODBUS_SERIAL.begin(MODBUS_BAUD, MODBUS_CONFIG);
+  modbus.begin(MODBUS_UNIT_ID, MODBUS_BAUD, MODBUS_CONFIG);
+  setupmodsensor();
+  setup_timer_b0();
+  mapmodsensors();
+
+  // u8 k = 0;
+  // for (; k < MAX_REALSENSOR; k++)
+  // {
+
+  //   Serial.print(rfidtohallid[k] + 1);
+  //   Serial.print("\t");
+  //   Serial.println(k + 1);
+  // }
+  // k = 0;
+  // for (; k < MAX_MODSENSOR; k++)
+  // {
+  //   print_rtusensor(modsensor[k]);
+  //   Serial.println();
+  // }
+  // while (1)
+  // Serial.print("setup");
+  ;
+
+  sei();
+
   // setting_enabled = 0;
 }
 
@@ -230,34 +325,49 @@ void setup()
 void loop()
 {
 
-  if (setting_enabled)
+  // if (setting_enabled)
+  // {
+  //   smode = 1;
+  //   while (smode)
+  //   {
+  //     Serial.println("Entering setting mode");
+  //     setmode();
+  //   }
+  // }
+
+  if (responsetimekeep_update == YES)
   {
-    smode = 1;
-    while (smode)
-    {
-      Serial.println("Entering setting mode");
-      setmode();
-    }
+    responsetimekeep();
+    hallaverage();
+    responsetimekeep_update = NO;
   }
-  // uint8_t i = 6;
-  for (uint8_t i = 1; i <= DEPLOYED_SENSOR; i++) // DEPLOYED_SENSOR
+
+  static u8 i = 0;
+
+  if (timetorfsend == 1)
   {
+    i++;
     encdata = encodeData(t45, rh45, co2, 0);
-    Serial.flush();
     txdata = makepacket(RFADDRH, RFADDRL + SENSOR_ADDR_OFFSET + i, RFCHANNEL + i, encdata);
     lora.sendData(txdata.rfbuf, 9); /// send over RF
-                                    // Serial.println();
+    timetorfsend = 0;
+  }
+
+  if (timetorfread == 1)
+  {
     sensor sx;
     sx = sensorzero;
-    frame[i - 1] = sx;
-    delay(500);
+    // frame[i - 1] = sx;
+    //  delay(500);
     Serial.print("TX: ");
     Serial.print(i);
-    if (lora.receiveData(encdata.buf, 6) == 6)
+    bool sensor_alive = NO;
+    if ((lora.receiveData(encdata.buf, 6) == 6) || FALSE)
     {
       uint8_t crc = compute_crc8(encdata.buf, 6);
-      if (crc == 0)
+      if ((crc == 0) || FALSE)
       {
+        sensor_alive = YES;
         command cx;
         cx.cmd = encdata.parts.id;
         sx.data.address = cx.fields.id;
@@ -265,32 +375,53 @@ void loop()
         sx.data.rh = encdata.parts.humidityScaled;
         sx.data.co2 = encdata.parts.co2;
         sx.data.t = encdata.parts.temperatureScaled;
-        u8 index = cx.fields.id - 1;
-        frame[index] = sx;
-        // Serial.print("\tRX: ");
-        // Serial.print(cx.fields.id);
-        // Serial.print("\tCRC: ");
-        // Serial.print((int)crc);
-        // Serial.print("\t");
-        printencdata(encdata);
+        rtusensor asensor;
+        // asensor.humidity = rrh;
+        // asensor.temp = rt;
+        // asensor.co2 = rco2;
+
+        u8 hallid = rfidtohallid[sx.data.address - 1];
+        // u8 hallid = rfidtohallid[i - 1];
+        asensor = modsensor[hallid];   // copy readonly data
+        asensor.humidity = sx.data.rh; // update rh
+        asensor.temp = sx.data.t;      // update temperature
+        asensor.co2 = sx.data.co2;     // update co2 if valid
+        update_holdingregisters(&asensor);
+        modsensor[hallid] = asensor; // copyback updated data
+        Serial.print("\t");
+        print_rtusensor(asensor);
+      } // valid crc
+
+    } // lora.received
+    if (sensor_alive == NO)
+    {
+      u8 hallid = rfidtohallid[i - 1];
+      if (modsensor[hallid].isdummy == YES)
+      {
+        rtusensor asensor;
+        asensor = modsensor[hallid]; // copy readonly data
+        dummysensor(&asensor, i);    // update dummy t,rh,c02
+        update_holdingregisters(&asensor);
+        modsensor[hallid] = asensor; // copyback updated data
+        Serial.print("\t");
+        print_rtusensor(asensor);
       }
     }
-    else
-      ;
+    if (i >= MAX_REALSENSOR)
+    {
+      Serial.println();
+      Serial.print("TX: ");
+      Serial.print(i + 1);
+      Serial.print("\t");
+      print_rtusensor(modsensor[HALL_AVGID]);
+      i = 0;
+    }
+    timetorfread = 0;
     Serial.println();
   }
-  // memcpy(framebuf, &frame[0], sizeof(framebuf));
-  // Serial.write(framebuf, DEPLOYED_SENSOR * sizeof(sensor));
-  // Serial.write(frame, DEPLOYED_SENSOR * sizeof(sensor));
-  //  memcpy(rxdata.rfbuf, txdata.rfbuf, sizeof(rxdata.rfbuf));
-  //  decodeData(txdata.rfpacket.payload, td, rhd, co2d, id);
-  //  randvalue = xorshift64(&state);
-  //  randtime = mapToRange(randvalue, 250, 15000); // random access time
-  //  nextime = randtime;
-  //  printrfdata(txdata);
-  //  accesstime = millis();
-  //  }
-  delay(10);
+  delay(1);
+  modbus.poll();
+  delay(4);
 }
 
 // ###################################################################
@@ -526,7 +657,7 @@ void printencdata(sensordata r)
   Serial.print("\tFRC: ");
   Serial.print(x.fields.frc);
   Serial.print("\tID: ");
-  Serial.println(x.fields.id);
+  Serial.print(x.fields.id); // ln can be used
 }
 
 void setuplora()
@@ -945,24 +1076,58 @@ void setmode()
 
 void setup_timer_b0() // 100ms
 {
-  TCB0.CCMP = 50000;                                  // CCMP/1MHz, 10ms
-  TCB0.CTRLA = TCB_CLKSEL_CLKDIV2_gc | TCB_ENABLE_bm; //| TCB_RUNSTDBY_bm;
+  TCB0.CCMP = 8000;                                   // CCMP/1MHz, 1ms
+  TCB0.CTRLA = TCB_CLKSEL_CLKDIV1_gc | TCB_ENABLE_bm; //| TCB_RUNSTDBY_bm;
   TCB0.INTFLAGS = TCB_CAPT_bm;                        // Clear any pending interrupt flags
   TCB0.INTCTRL = TCB_CAPT_bm;                         // Enable TCB0 timeout interrupt
 };
 
 ISR(TCB0_INT_vect) // 100ms
 {                  ///  // active only when awake
-  static unsigned int t0 = 50, timercount = t0, xx = 0;
-  timercount--;
-  if (timercount == 0)
+  static u16 tms = 0;
+  static u16 tscan = 0;
+
+  if (tms == 1000)
   {
-    timercount = t0;
-    xx = !xx;
-    // digitalWrite(3, xx);
-    PORTA_OUT = xx << 7;
-    // PORTA_OUTTGL |= PIN7_bm;
+    tms = 0;
+    update_data = YES;
+    responsetimekeep_update = YES;
   }
+  switch (tscan)
+  {
+  case 1: // timetorfsend
+    timetorfsend = 1;
+    timetorfread = 0;
+    break;
+  case READ_DELAY: // timetorfread
+    timetorfread = 1;
+    timetorfsend = 0;
+    break;
+  case SCAN_DELAY:
+    tscan = 0;
+    break;
+  default:
+    break;
+  }
+  tscan++;
+  // if (tscan >= 1)
+  // {
+  //   tscan = 0;
+  //   timetoscan = 1;
+  // }
+  // tscan++;
+  tms++;
+  // static unsigned int t0 = 50, timercount = t0, xx = 0;
+  // timercount--;
+  // if (timercount == 0)
+  // {
+  //   timercount = t0;
+  //   xx = !xx;
+  //   // digitalWrite(3, xx);
+  //   PORTA_OUT = xx << 7;
+  //   // PORTA_OUTTGL |= PIN7_bm;
+  // }
+
   TCB0.INTFLAGS = TCB_CAPT_bm; /* Clear the interrupt flag */
   // sleep_cpu();
 }
@@ -1072,4 +1237,300 @@ uint8_t confirmyesno()
   }
   delay(50);
   Serial.flush();
+}
+
+// ######################### converter float to uintx10 #############################
+u16 floattoint(float value)
+{                                      // Convert float to 16-bit integer (Modbus doesn't directly support floats)
+  return static_cast<u16>(value * 10); // Scale by 10 to preserve one decimal place
+}
+
+void setupmodsensor()
+{
+  u8 k = 0;
+  for (; k < MAX_MODSENSOR; k++)
+  {
+    modsensor[k].hallid = k + 1;
+    modsensor[k].rfid = 0xff; // means real sensor doesnt exist
+    if (k < 24)
+    { // only TRH sensors
+      modsensor[k].startadd = (k * 2 + 1);
+      modsensor[k].co2 = 0;
+      modsensor[k].temp = 0;
+      modsensor[k].humidity = 0;
+      modsensor[k].hasco2 = NO;
+      modsensor[k].addavg = YES;
+      modsensor[k].istrhok = NO;
+      modsensor[k].isco2ok = NO;
+      modsensor[k].isdummy = YES;
+      modsensor[k].rfid = k + 1 + 25; // k=0->26, 1->27, 23->49, total 24 sensors
+      if (k < 12)
+      {
+        modsensor[k].location = MALE;
+      }
+      else
+      {
+        modsensor[k].location = FEMALE;
+      }
+    }
+    else if (k < 49)
+    { // only CO2 n TRH sensors
+      modsensor[k].startadd = (49 + (k - 24) * 3);
+      modsensor[k].co2 = 0;
+      modsensor[k].temp = 0;
+      modsensor[k].humidity = 0;
+      modsensor[k].hasco2 = YES;
+      modsensor[k].addavg = YES;
+      modsensor[k].istrhok = NO;
+      modsensor[k].isco2ok = NO;
+      modsensor[k].isdummy = NO;
+      modsensor[k].rfid = k - 23; // k=24 -> 1, 25->2, 48->25, total 25 sensors
+      if (k < 36)
+      {
+        modsensor[k].location = MALE;
+      }
+      else
+      {
+        modsensor[k].location = FEMALE;
+      }
+      if (k == 48)
+      {
+        // pujyashri CO2 n TRH
+        modsensor[k].addavg = NO;
+        modsensor[k].isdummy = YES;
+        modsensor[k].location = PUJYASHRI;
+      }
+    }
+    else if (k < MAX_MODSENSOR)
+    {
+      modsensor[k].startadd = (124 + (k - 49) * 2);
+      modsensor[k].co2 = 0;
+      modsensor[k].temp = 0;
+      modsensor[k].humidity = 0;
+      modsensor[k].hasco2 = NO;
+      modsensor[k].addavg = NO;
+      modsensor[k].istrhok = NO;
+      modsensor[k].isco2ok = NO;
+      modsensor[k].isdummy = YES;
+      switch (k)
+      {
+      case 49: // stageleft TRH
+        modsensor[k].location = STAGELEFT;
+        modsensor[k].rfid = 50;
+        break;
+      case 50: // stageright TRH
+        modsensor[k].location = STAGERIGHT;
+        modsensor[k].rfid = 51;
+        break;
+      case 51: // stagefront TRH
+        modsensor[k].location = STAGEFRONT;
+        modsensor[k].rfid = 52;
+        break;
+      case 52: // ambient TRH
+        modsensor[k].location = AMBIENT;
+        modsensor[k].rfid = 53;
+        break;
+      case 53: // ambient TRH
+        modsensor[k].location = AMBIENT;
+        modsensor[k].rfid = 54;
+        break;
+      case 54: // hall average CO2 n TRH 48
+        modsensor[k].location = HALLAVERAGE;
+        modsensor[k].hasco2 = YES;
+        modsensor[k].rfid = 0xff; // means not real sensor.
+        break;
+      default:
+        break;
+      }
+    }
+    else
+      ;
+  }
+}
+
+void process_sensor()
+{
+}
+
+void print_rtusensor(rtusensor sens)
+{
+
+  char l;
+  switch (sens.location)
+  {
+  case MALE:
+    l = 'm';
+    break;
+  case FEMALE:
+    l = 'f';
+    break;
+  case PUJYASHRI:
+    l = 'p';
+    break;
+  case AMBIENT:
+    l = 'A';
+    break;
+  case STAGELEFT:
+    l = 'L';
+    break;
+  case STAGERIGHT:
+    l = 'R';
+    break;
+  case STAGEFRONT:
+    l = 'F';
+    break;
+  case HALLAVERAGE:
+    l = '+';
+    break;
+  default:
+    l = 'X';
+    break;
+  };
+
+  Serial.print((int16_t)sens.hallid);
+  if (sens.addavg)
+  {
+    Serial.print('+');
+  }
+  Serial.print("\t");
+  Serial.print((int16_t)sens.rfid);
+  if (sens.isdummy)
+  {
+    Serial.print('x');
+  }
+  Serial.print("\t");
+  Serial.print((int16_t)sens.startadd);
+  Serial.print("\t");
+  Serial.print(l);
+  Serial.print("\t");
+  Serial.print((u16)sens.timeout);
+  Serial.print("\t");
+  Serial.print(String((float)sens.temp / 10, 1));
+  Serial.print("\t");
+  Serial.print(String((float)sens.humidity / 10, 1));
+  Serial.print("\t");
+  if (sens.hasco2)
+  {
+    Serial.print(sens.co2);
+    Serial.print("\t");
+    Serial.print(sens.isco2ok);
+    Serial.print("\t");
+  }
+}
+
+void mapmodsensors()
+{
+  u8 r = 0, k = 0;
+  for (; r < MAX_REALSENSOR; r++)
+  {
+    k = 0;
+    for (; k < MAX_MODSENSOR; k++)
+    {
+      if (modsensor[k].rfid == (r + 1))
+      {
+        rfidtohallid[r] = k;
+      }
+    }
+  }
+}
+
+void responsetimekeep()
+{
+  u8 r = 0;
+  for (; r < MAX_REALSENSOR; r++)
+  {
+    if (modsensor[r].timeout < 255)
+    {
+      modsensor[r].timeout++;
+    }
+  }
+}
+
+void hallaverage()
+{
+  u8 r = 0, trhn = 0, co2n = 0;
+  u16 tsum = 0, rhsum = 0, tavg = 0, rhavg = 0;
+  u32 co2sum = 0;
+  u16 co2avg = 0;
+  for (; r < MAX_REALSENSOR; r++)
+  {
+    if (modsensor[r].addavg == YES)
+    {
+      if (modsensor[r].istrhok == YES)
+      {
+        tsum += modsensor[r].temp;
+        rhsum += modsensor[r].humidity;
+        trhn++;
+        // Serial.println("tavg");
+        // print_rtusensor(modsensor[r]);
+        // Serial.println();
+        // modsensor[r].avg_addedlast = 1; // not used
+      }
+
+      if ((modsensor[r].hasco2 == YES) && (modsensor[r].isco2ok == YES))
+      {
+        co2sum += modsensor[r].co2;
+        co2n++;
+        // Serial.println("co2avg");
+        // print_rtusensor(modsensor[r]);
+        // Serial.println();
+      }
+    }
+  }
+  co2avg = (u16)((float)co2sum / co2n);
+  tavg = (u16)((float)tsum / trhn);
+  rhavg = (u16)((float)rhsum / trhn);
+  modsensor[HALL_AVGID].co2 = co2avg;
+  modsensor[HALL_AVGID].temp = tavg;
+  modsensor[HALL_AVGID].humidity = rhavg;
+}
+
+void dummysensor(rtusensor *asensor, u8 i)
+{
+  u8 hallid = rfidtohallid[i - 1];
+  u64 randtemp, randhum, randco2, randvalid;
+  randtemp = xorshift64(&state);
+  randhum = xorshift64(&state);
+  randco2 = xorshift64(&state);
+  randvalid = xorshift64(&state);
+  u16 rt, rrh, rco2, rvalid;
+  rt = mapToRange(randtemp, 240, 250);   // random
+  rrh = mapToRange(randtemp, 400, 410);  // random
+  rco2 = mapToRange(randtemp, 400, 410); // random
+  rvalid = mapToRange(randtemp, 1, 100); // random
+  asensor->temp = rt;
+  asensor->humidity = rrh;
+  asensor->co2 = rco2;
+}
+
+void update_holdingregisters(rtusensor *asensor)
+{
+  asensor->istrhok = YES;     // assume sht45 always working
+  asensor->timeout = 0;       // reset timeout
+  if (asensor->hasco2 == YES) // add co2 if scd30 installed
+  {
+    if ((asensor->co2 > 300) && (asensor->co2 < 6000))
+    { // add co2 if scd30 working and received valid co2 range
+      asensor->isco2ok = YES;
+    }
+    else
+    {
+      asensor->co2 = 0;
+      asensor->isco2ok = NO; // scd30 not working, will exclude from avging
+    }
+  };
+
+  holdingRegisters[asensor->startadd] = asensor->temp;
+  holdingRegisters[asensor->startadd + 1] = asensor->humidity;
+  if (asensor->hasco2 == YES)
+  {
+    if (asensor->isco2ok == YES)
+    {
+      holdingRegisters[asensor->startadd + 2] = asensor->co2;
+    }
+    else
+    {
+      holdingRegisters[asensor->startadd + 2] = 0;
+    }
+  }
 }
