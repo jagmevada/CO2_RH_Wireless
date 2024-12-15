@@ -98,11 +98,15 @@ void LORA_E32::readParameters()
   uint8_t buffer[6]; // Expect 6 bytes of response
   if (receiveData(buffer, 6) == 6)
   {
+#ifdef VERBOSE
     printparameter(buffer, 6);
+#endif
   }
   else
   {
+#ifdef VERBOSE
     Serial.println("Failed to read parameters.");
+#endif
   }
 }
 
@@ -116,7 +120,9 @@ void LORA_E32::setParameters(uint8_t addrh, uint8_t addrl, SPED sped,
   uint8_t buffer[6];
   if (receiveData(buffer, 6) == 6)
   {
+#ifdef VERBOSE
     printparameter(buffer, 6);
+#endif
   }
   else
   {
@@ -175,7 +181,9 @@ void LORA_E32::printparameter(uint8_t *buffer, uint8_t len)
   uint8_t channel = buffer[4];
   option.byte = buffer[5];
   // Print out the parameters for debugging
+
   Serial.println("\nPrint Parameters:");
+
   // Serial.println(buffer[0], HEX);
   // Serial.println(buffer[1], HEX);
   // Serial.println(buffer[2], HEX);

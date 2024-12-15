@@ -198,7 +198,7 @@ void setup()
   frc_state = FRC;
   lora.begin(9600);
   delay(100);
-  Serial.println("init...");
+  // Serial.println("init...");
   // Wire.begin();
   // Set the module to normal mode
   lora.reset();
@@ -210,12 +210,17 @@ void setup()
 
   // lora.setMode(MODE_NORMAL);
   delay(10);
+#ifdef VERBOSE
   lora.getversion();
+#endif
   delay(10);
   lora.setMode(MODE_NORMAL);
   delay(200);
   t0 = millis();
+#ifdef VERBOSE
   checkinput();
+#endif
+  // setting_enabled = 0;
 }
 
 // ###################################################################
@@ -246,8 +251,8 @@ void loop()
     sx = sensorzero;
     frame[i - 1] = sx;
     delay(500);
-    // Serial.print("TX: ");
-    // Serial.print(i);
+    Serial.print("TX: ");
+    Serial.print(i);
     if (lora.receiveData(encdata.buf, 6) == 6)
     {
       uint8_t crc = compute_crc8(encdata.buf, 6);
@@ -272,10 +277,10 @@ void loop()
     }
     else
       ;
-    // Serial.println();
+    Serial.println();
   }
-  memcpy(framebuf, &frame[0], sizeof(framebuf));
-  Serial.write(framebuf, DEPLOYED_SENSOR * sizeof(sensor));
+  // memcpy(framebuf, &frame[0], sizeof(framebuf));
+  // Serial.write(framebuf, DEPLOYED_SENSOR * sizeof(sensor));
   // Serial.write(frame, DEPLOYED_SENSOR * sizeof(sensor));
   //  memcpy(rxdata.rfbuf, txdata.rfbuf, sizeof(rxdata.rfbuf));
   //  decodeData(txdata.rfpacket.payload, td, rhd, co2d, id);
@@ -537,9 +542,9 @@ void setuplora()
   option.fields.fec = FEC_ON;
   option.fields.power = POWER_LEVEL_10dBm;
   // uint8_t buffer[6] = {0xc0, RFADDRH, RFADDRL+MASTER_ADDR, sped.byte, RFCHANNEL, option.byte};
-
+#ifdef VERBOSE
   Serial.println("\n\nSetparameter:");
-
+#endif
   // lora.printparameter(buffer, 6);
   lora.setParameters(RFADDRH, RFADDRL + DEVICE_ADDR, sped, RFCHANNEL, option); // set my address
   // delay(10);
@@ -664,7 +669,9 @@ uint8_t read_asc_eerpom()
     delay(10);
     EEPROM.write(asc_addr, asc_state);
     delay(10);
+#ifdef VERBOSE
     Serial.println("EEPROM Flashed");
+#endif
     return asc_state;
   }
   else
