@@ -15,7 +15,7 @@
 // ###################################################################
 
 #define MASTER
-#define DEPLOYED_SENSOR 25
+
 #define MASTER_ADDR 0
 #define DEVICE_ID 0
 #define SENSOR_CHANNEL_OFFSET 0x10
@@ -70,9 +70,9 @@ typedef union
     u16 co2 : 16;
   } data;
 } sensor;
-
+#define DEPLOYED_SENSOR 25
 sensor frame[DEPLOYED_SENSOR]; // Number of DEPLOYED_SENSORS
-u8 framebuf[DEPLOYED_SENSOR * 8];
+u8 framebuf[DEPLOYED_SENSOR * sizeof(sensor)];
 typedef union
 {
   uint8_t cmd;
@@ -245,7 +245,7 @@ void loop()
     sensor sx;
     sx = sensorzero;
     frame[i - 1] = sx;
-    delay(300);
+    delay(500);
     // Serial.print("TX: ");
     // Serial.print(i);
     if (lora.receiveData(encdata.buf, 6) == 6)
@@ -267,7 +267,7 @@ void loop()
         // Serial.print("\tCRC: ");
         // Serial.print((int)crc);
         // Serial.print("\t");
-        // printencdata(encdata);
+        printencdata(encdata);
       }
     }
     else
