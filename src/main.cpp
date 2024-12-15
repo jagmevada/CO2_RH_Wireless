@@ -359,10 +359,8 @@ void loop()
   {
     sensor sx;
     sx = sensorzero;
-    // frame[i - 1] = sx;
-    //  delay(500);
-    // Serial.print("TX: ");
-    // Serial.print(i);
+    Serial.print("TX: ");
+    Serial.print(i);
     bool sensor_alive = NO;
     if ((lora.receiveData(encdata.buf, 6) == 6) || FALSE)
     {
@@ -378,9 +376,6 @@ void loop()
         sx.data.co2 = encdata.parts.co2;
         sx.data.t = encdata.parts.temperatureScaled;
         rtusensor asensor;
-        // asensor.humidity = rrh;
-        // asensor.temp = rt;
-        // asensor.co2 = rco2;
 
         u8 hallid = rfidtohallid[sx.data.address - 1];
         // u8 hallid = rfidtohallid[i - 1];
@@ -388,21 +383,26 @@ void loop()
         asensor.humidity = sx.data.rh; // update rh
         asensor.temp = sx.data.t;      // update temperature
         asensor.co2 = sx.data.co2;     // update co2 if valid
+        asensor.isco2ok = YES;         // to add in hall avging if sensor id is valid
+        asensor.timeout = 0;           // reset timeout
         update_holdingregisters(&asensor);
         modsensor[hallid] = asensor; // copyback updated data
-        // Serial.print("\t");
-        // print_rtusensor(asensor);
+        Serial.print("\t");
+        print_rtusensor(asensor);
       } // valid crc
 
     } // lora.received
     if (sensor_alive == NO)
     {
       u8 hallid = rfidtohallid[i - 1];
-      if ((modsensor[hallid].isdummy == YES) || TRUE)
+      if ((modsensor[hallid].isdummy == YES) || FALSE)
       {
         rtusensor asensor;
         asensor = modsensor[hallid]; // copy readonly data
-        dummysensor(&asensor, i);    // update dummy t,rh,c02
+        asensor.istrhok = NO;        // to exclude from avging
+        asensor.isco2ok = NO;        // exclude from avging
+        // asensor.timeout = 0;        // reset timeout
+        dummysensor(&asensor, i); // update dummy t,rh,c02
         update_holdingregisters(&asensor);
         modsensor[hallid] = asensor; // copyback updated data
         // Serial.print("\t");
@@ -411,16 +411,16 @@ void loop()
     }
     if (i >= MAX_REALSENSOR)
     {
-      // Serial.println();
-      // Serial.print("TX: ");
-      // Serial.print(i + 1);
-      // Serial.print("\t");
-      // print_rtusensor(modsensor[HALL_AVGID]);
+      Serial.println();
+      Serial.print("TX: ");
+      Serial.print(i + 1);
+      Serial.print("\t");
+      print_rtusensor(modsensor[HALL_AVGID]);
       update_holdingregisters(&modsensor[HALL_AVGID]);
       i = 0;
     }
     timetorfread = 0;
-    // Serial.println();
+    Serial.println();
   }
   delay(1);
   modbus.poll();
@@ -1508,8 +1508,7 @@ void dummysensor(rtusensor *asensor, u8 i)
 
 void update_holdingregisters(rtusensor *asensor)
 {
-  asensor->istrhok = YES;     // assume sht45 always working
-  asensor->timeout = 0;       // reset timeout
+
   if (asensor->hasco2 == YES) // add co2 if scd30 installed
   {
     if ((asensor->co2 > 300) && (asensor->co2 < 6000))
