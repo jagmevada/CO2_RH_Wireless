@@ -14,10 +14,10 @@
 
 #define ASC_EEPROM_ADDR 0x01
 #define MASTER_ADDR 0
-#define DEVICE_ID 6
+#define DEVICE_ID 20
 #define SENSOR_ADDR_OFFSET 0x10
 #define SENSOR_CHANNEL_OFFSET 0x05
-
+// #define SCD
 #ifdef MASTER
 #define DEVICE_ADDR MASTER_ADDR
 #else
@@ -90,6 +90,7 @@ typedef union rfdata
   datapack rfpacket; // Structured packet
   uint8_t rfbuf[9];  // Buffer for raw data, should match the size of datapack
 } rfpacket;
+
 // Define a union to overlay a 32-bit integer with the three components
 
 // ###################################################################
@@ -149,8 +150,10 @@ rfpacket rxdata;
 void setup()
 {
   Serial.begin(9600);
+#ifdef SCD
   EEPROM.begin();
   asc_state = read_asc_eerpom();
+#endif
   frc_state = FRC;
   lora.begin(9600);
   delay(100);
@@ -174,18 +177,22 @@ void setup()
   lora.setMode(MODE_NORMAL);
   delay(10);
   initializeSHT45();
+#ifdef SCD
   initializeSCD30(asc_state);
+  // airSensor.setForcedRecalibrationFactor(500);
   delay(2000); // Wait for sensor stabilization
-  configureSCD30();
+  // configureSCD30();
   // airSensor.setAutoSelfCalibration(1);
   Serial.println();
   printSCD30Settings();
-
+#endif
   // randvalue = xorshift64(&state);
   // randtime = mapToRange(randvalue, 0, 15000);
   // accesstime = millis();
   getSHT45Data();
+#ifdef SCD
   getSCD30Data();
+#endif
   t0 = millis();
 }
 
@@ -200,7 +207,9 @@ void loop()
   { /// independent sensor reading
     t0 = millis();
     getSHT45Data();
+#ifdef SCD
     getSCD30Data();
+#endif
     encdata = encodeData(t45, rh45, co2, 0);
     printencdata(encdata);
   };
