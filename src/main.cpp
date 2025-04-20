@@ -388,6 +388,7 @@ void loop()
         asensor.humidity = sx.data.rh; // update rh
         asensor.temp = sx.data.t;      // update temperature
         asensor.co2 = sx.data.co2;     // update co2 if valid
+        asensor.istrhok = YES;
         update_holdingregisters(&asensor);
         modsensor[hallid] = asensor; // copyback updated data
         // Serial.print("\t");
@@ -398,6 +399,7 @@ void loop()
     if (sensor_alive == NO)
     {
       u8 hallid = rfidtohallid[i - 1];
+
       if ((modsensor[hallid].isdummy == YES) || TRUE)
       {
         rtusensor asensor;
@@ -1259,8 +1261,8 @@ void setupmodsensor()
     { // only TRH sensors
       modsensor[k].startadd = (k * 2 + 1);
       modsensor[k].co2 = 0;
-      modsensor[k].temp = 0;
-      modsensor[k].humidity = 0;
+      modsensor[k].temp = 20;
+      modsensor[k].humidity = 100;
       modsensor[k].hasco2 = NO;
       modsensor[k].addavg = YES;
       modsensor[k].istrhok = NO;
@@ -1279,9 +1281,9 @@ void setupmodsensor()
     else if (k < 49)
     { // only CO2 n TRH sensors
       modsensor[k].startadd = (49 + (k - 24) * 3);
-      modsensor[k].co2 = 0;
-      modsensor[k].temp = 0;
-      modsensor[k].humidity = 0;
+      modsensor[k].co2 = 300;
+      modsensor[k].temp = 20;
+      modsensor[k].humidity = 100;
       modsensor[k].hasco2 = YES;
       modsensor[k].addavg = YES;
       modsensor[k].istrhok = NO;
@@ -1308,8 +1310,8 @@ void setupmodsensor()
     {
       modsensor[k].startadd = (124 + (k - 49) * 2);
       modsensor[k].co2 = 0;
-      modsensor[k].temp = 0;
-      modsensor[k].humidity = 0;
+      modsensor[k].temp = 20;
+      modsensor[k].humidity = 100;
       modsensor[k].hasco2 = NO;
       modsensor[k].addavg = NO;
       modsensor[k].istrhok = NO;
@@ -1503,12 +1505,13 @@ void dummysensor(rtusensor *asensor, u8 i)
   rvalid = mapToRange(randtemp, 1, 100); // random
   asensor->temp = rt;
   asensor->humidity = rrh;
-  asensor->co2 = rco2;
+  asensor->co2 = 300;
+  asensor->istrhok = NO;
 }
 
 void update_holdingregisters(rtusensor *asensor)
 {
-  asensor->istrhok = YES;     // assume sht45 always working
+  // asensor->istrhok = YES;     // assume sht45 always working
   asensor->timeout = 0;       // reset timeout
   if (asensor->hasco2 == YES) // add co2 if scd30 installed
   {
