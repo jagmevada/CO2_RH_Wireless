@@ -20,10 +20,10 @@ typedef uint64_t u64;
 // ###################### DEFINED CONSTANTS ##########################
 // ###################################################################
 #define MODBUS_SERIAL Serial
-#define MODBUS_BAUD 115200
-#define MODBUS_CONFIG SERIAL_8N1
+#define MODBUS_BAUD 9600
+#define MODBUS_CONFIG SERIAL_8E1
 #define MODBUS_UNIT_ID 10
-#define HOLDREG_COUNT 137
+#define HOLDREG_COUNT 136
 ModbusRTUSlave modbus(MODBUS_SERIAL);
 u16 holdingRegisters[HOLDREG_COUNT];
 
@@ -1265,7 +1265,7 @@ void setupmodsensor()
       modsensor[k].addavg = YES;
       modsensor[k].istrhok = NO;
       modsensor[k].isco2ok = NO;
-      modsensor[k].isdummy = YES;
+      modsensor[k].isdummy = NO;
       modsensor[k].rfid = k + 1 + 25; // k=0->26, 1->27, 23->49, total 24 sensors
       if (k < 12)
       {
@@ -1314,7 +1314,7 @@ void setupmodsensor()
       modsensor[k].addavg = NO;
       modsensor[k].istrhok = NO;
       modsensor[k].isco2ok = NO;
-      modsensor[k].isdummy = YES;
+      modsensor[k].isdummy = NO;
       switch (k)
       {
       case 49: // stageleft TRH
@@ -1497,8 +1497,8 @@ void dummysensor(rtusensor *asensor, u8 i)
   randco2 = xorshift64(&state);
   randvalid = xorshift64(&state);
   u16 rt, rrh, rco2, rvalid;
-  rt = mapToRange(randtemp, 230, 260);   // random
-  rrh = mapToRange(randtemp, 400, 450);  // random
+  rt = 20;//mapToRange(randtemp, 230, 260);   // random
+  rrh = 100;// mapToRange(randtemp, 400, 450);  // random
   rco2 = mapToRange(randtemp, 500, 501); // random
   rvalid = mapToRange(randtemp, 1, 100); // random
   asensor->temp = rt;
@@ -1523,17 +1523,17 @@ void update_holdingregisters(rtusensor *asensor)
     }
   };
 
-  holdingRegisters[asensor->startadd] = asensor->temp;
-  holdingRegisters[asensor->startadd + 1] = asensor->humidity;
+  holdingRegisters[asensor->startadd-1] = asensor->temp ;
+  holdingRegisters[asensor->startadd + 1 -1] = asensor->humidity; 
   if (asensor->hasco2 == YES)
   {
     if (asensor->isco2ok == YES)
     {
-      holdingRegisters[asensor->startadd + 2] = asensor->co2;
+      holdingRegisters[asensor->startadd + 2 -1] = asensor->co2;
     }
     else
     {
-      holdingRegisters[asensor->startadd + 2] = 0;
+      holdingRegisters[asensor->startadd + 2-1] = 0;
     }
   }
 }
